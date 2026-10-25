@@ -14,6 +14,7 @@ Cyborg HVAC starts with Hisense ducted systems on the ConnectLife app and is bui
 - **Every zone as its own device**: a damper you can open, close or set from 0 to 100%, plus a power switch. Zones keep their opening when switched off, as on the wall controller.
 - **The app's features as switches**: Powerful, Quiet, Sleep, Health, Energy Saving and 8 °C heat, each checked against the current mode so Home Assistant explains why a change is refused.
 - **Fast, light cloud use**: one request polls every unit, push updates arrive within seconds, and changes made together (a slider across five zones) go out as one command.
+- **Smart comfort**: good-practice advice using your room, presence, outdoor, forecast and solar sensors, guest mode, and opt-in autopilot that zones by presence, balances every room, pre-conditions ahead of the weather and uses spare solar. See [smart comfort](https://github.com/engabd11/cyborg-hvac/blob/main/docs/smart-comfort.md).
 - **A demo unit** that simulates rooms warming and cooling, for building dashboards before you connect anything.
 
 ## Works with
@@ -50,7 +51,9 @@ Add, rename or remove zones later from the integration page.
 
 ## Documentation
 
+- [Smart comfort](https://github.com/engabd11/cyborg-hvac/blob/main/docs/smart-comfort.md)
 - [Entities](https://github.com/engabd11/cyborg-hvac/blob/main/docs/entities.md)
+- [Card contract](https://github.com/engabd11/cyborg-hvac/blob/main/docs/card-contract.md)
 - [Supported devices](https://github.com/engabd11/cyborg-hvac/blob/main/docs/supported-devices.md)
 - [Adding a brand](https://github.com/engabd11/cyborg-hvac/blob/main/docs/adding-a-brand.md)
 - [Development](https://github.com/engabd11/cyborg-hvac/blob/main/docs/development.md)
