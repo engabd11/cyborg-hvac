@@ -682,6 +682,11 @@ class ComfortManager:
                 "name": info.name,
                 "device_id": device_id(unit_id),
                 "climate": entity_id("climate", f"{unit_id}_climate"),
+                "entities": {
+                    "advice": entity_id("sensor", f"{unit_id}_advice"),
+                    "guest_mode": entity_id("switch", f"{unit_id}_guest_mode"),
+                    **{b: entity_id("switch", f"{unit_id}_{b}") for b in BEHAVIOURS},
+                },
                 "online": unit.online,
                 "power": unit.power,
                 "mode": unit.mode.value if unit.mode else None,

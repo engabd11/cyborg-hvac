@@ -155,6 +155,10 @@ async def test_inputs_options_and_websocket(hass: HomeAssistant, hass_ws_client)
     event = (await client.receive_json())["event"]
     assert event["schema"] == 1
     assert event["unit"]["climate"] == "climate.demo_ducted_unit"
+    assert event["unit"]["entities"]["guest_mode"] == "switch.demo_ducted_unit_guest_mode"
+    assert event["unit"]["entities"]["room_balancing"] == (
+        "switch.demo_ducted_unit_autopilot_room_balancing"
+    )
     assert event["house"]["outdoor"] == 31.5
     assert event["house"]["solar_export_w"] == 2400
     assert event["house"]["anyone_home"] is True
