@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import (
@@ -60,6 +60,7 @@ class CyborgRuntimeData:
     backend: HvacBackend
     coordinator: HvacCoordinator
     reload_snapshot: object = None
+    comfort: Any = None
     extras: dict = field(default_factory=dict)
 
 

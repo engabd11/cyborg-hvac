@@ -82,14 +82,46 @@
           "data": {
             "slot": "Zone slot",
             "name": "Name",
-            "area": "Area"
+            "area": "Area",
+            "temperature_sensor": "Room temperature sensor",
+            "humidity_sensor": "Room humidity sensor",
+            "presence_sensors": "Presence or motion sensors",
+            "window_sensors": "Window or door sensors",
+            "comfort_offset": "Comfort offset",
+            "priority": "Room type",
+            "guest_zone": "Guest zone",
+            "min_opening": "Minimum opening",
+            "max_opening": "Maximum opening",
+            "spill": "Spill zone"
+          },
+          "data_description": {
+            "comfort_offset": "Shifts this room's comfort range, for example 1 degree cooler for a bedroom.",
+            "guest_zone": "Guest mode gives this zone priority. Use it for living and dining areas.",
+            "spill": "May be opened to keep enough airflow when other zones close.",
+            "min_opening": "The smallest opening smart comfort will set while this zone is on."
           }
         },
         "reconfigure": {
           "title": "Edit zone",
           "data": {
             "name": "Name",
-            "area": "Area"
+            "area": "Area",
+            "temperature_sensor": "Room temperature sensor",
+            "humidity_sensor": "Room humidity sensor",
+            "presence_sensors": "Presence or motion sensors",
+            "window_sensors": "Window or door sensors",
+            "comfort_offset": "Comfort offset",
+            "priority": "Room type",
+            "guest_zone": "Guest zone",
+            "min_opening": "Minimum opening",
+            "max_opening": "Maximum opening",
+            "spill": "Spill zone"
+          },
+          "data_description": {
+            "comfort_offset": "Shifts this room's comfort range, for example 1 degree cooler for a bedroom.",
+            "guest_zone": "Guest mode gives this zone priority. Use it for living and dining areas.",
+            "spill": "May be opened to keep enough airflow when other zones close.",
+            "min_opening": "The smallest opening smart comfort will set while this zone is on."
           }
         }
       },
@@ -126,17 +158,42 @@
       }
     },
     "switch": {
-      "powerful": { "name": "Powerful" },
-      "eco": { "name": "Energy saving" },
-      "quiet": { "name": "Quiet" },
-      "sleep": { "name": "Sleep" },
-      "frost_guard": { "name": "8 °C heat" },
-      "ai": { "name": "AI mode" },
-      "health": { "name": "Health" },
-      "fresh_air": { "name": "Fresh air" },
-      "display": { "name": "Display" },
-      "beep": { "name": "Beep" },
-      "zone_power": { "name": "Power" }
+      "powerful": {
+        "name": "Powerful"
+      },
+      "eco": {
+        "name": "Energy saving"
+      },
+      "quiet": {
+        "name": "Quiet"
+      },
+      "sleep": {
+        "name": "Sleep"
+      },
+      "frost_guard": {
+        "name": "8 °C heat"
+      },
+      "ai": {
+        "name": "AI mode"
+      },
+      "health": {
+        "name": "Health"
+      },
+      "fresh_air": {
+        "name": "Fresh air"
+      },
+      "display": {
+        "name": "Display"
+      },
+      "beep": {
+        "name": "Beep"
+      },
+      "zone_power": {
+        "name": "Power"
+      },
+      "guest_mode": {
+        "name": "Guest mode"
+      }
     },
     "select": {
       "sleep": {
@@ -151,30 +208,162 @@
       }
     },
     "number": {
-      "temp_offset": { "name": "Temperature offset" }
+      "temp_offset": {
+        "name": "Temperature offset"
+      }
     },
     "sensor": {
-      "return_air_temperature": { "name": "Return air temperature" }
+      "return_air_temperature": {
+        "name": "Return air temperature"
+      },
+      "advice": {
+        "name": "Advice"
+      }
     },
     "binary_sensor": {
-      "filter": { "name": "Filter" },
-      "fault": { "name": "Fault" }
+      "filter": {
+        "name": "Filter"
+      },
+      "fault": {
+        "name": "Fault"
+      },
+      "zone_occupied": {
+        "name": "Occupied"
+      }
     }
   },
   "exceptions": {
-    "unit_offline": { "message": "The unit is offline." },
-    "feature_unsupported": { "message": "This unit does not have that feature." },
-    "feature_not_available": { "message": "That feature works only while the unit is on in a suitable mode. Powerful needs heating or cooling; 8 °C heat needs heating." },
-    "fan_speed_unsupported": { "message": "This unit does not have that fan speed." },
-    "device_busy": { "message": "The unit refused the change in its current state: {error}" },
-    "auth_failed": { "message": "The sign-in has expired. Sign in again from the integration page." },
-    "command_failed": { "message": "The change could not be sent: {error}" },
-    "account_accept_terms": { "message": "ConnectLife needs you to accept updated terms in the app." }
+    "unit_offline": {
+      "message": "The unit is offline."
+    },
+    "feature_unsupported": {
+      "message": "This unit does not have that feature."
+    },
+    "feature_not_available": {
+      "message": "That feature works only while the unit is on in a suitable mode. Powerful needs heating or cooling; 8 °C heat needs heating."
+    },
+    "fan_speed_unsupported": {
+      "message": "This unit does not have that fan speed."
+    },
+    "device_busy": {
+      "message": "The unit refused the change in its current state: {error}"
+    },
+    "auth_failed": {
+      "message": "The sign-in has expired. Sign in again from the integration page."
+    },
+    "command_failed": {
+      "message": "The change could not be sent: {error}"
+    },
+    "account_accept_terms": {
+      "message": "ConnectLife needs you to accept updated terms in the app."
+    },
+    "recommendation_not_found": {
+      "message": "There is no open recommendation called {id}."
+    },
+    "recommendation_no_action": {
+      "message": "The recommendation {id} has nothing to apply; follow its advice by hand."
+    }
   },
   "issues": {
     "account_accept_terms": {
       "title": "Accept the new ConnectLife terms",
       "description": "ConnectLife has paused access until you accept updated terms. Open the ConnectLife app, accept them, and Cyborg HVAC reconnects on its own."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Smart comfort",
+        "menu_options": {
+          "inputs": "House sensors and weather",
+          "comfort": "Comfort targets"
+        }
+      },
+      "inputs": {
+        "title": "House sensors and weather",
+        "description": "Smart comfort uses these to give advice. Leave out anything you do not have.",
+        "data": {
+          "outdoor_sensor": "Outdoor temperature sensor",
+          "weather_entity": "Weather forecast (for example BOM)",
+          "people": "People (home or away)",
+          "solar_grid_sensor": "Grid power sensor",
+          "solar_export_negative": "Grid power is negative while exporting",
+          "scan_interval": "Polling interval"
+        },
+        "data_description": {
+          "solar_grid_sensor": "Used to spot spare solar. Most inverters report export as negative grid power.",
+          "people": "Person entities, trackers or presence sensors that are on while someone is home."
+        }
+      },
+      "comfort": {
+        "title": "Comfort targets",
+        "description": "Below the heating target a room is too cold; above the cooling target it is too warm. In between is comfortable.",
+        "data": {
+          "heat_day": "Heating target, day",
+          "heat_night": "Heating target, night",
+          "heat_away": "Heating target, away",
+          "cool_day": "Cooling target, day",
+          "cool_night": "Cooling target, night",
+          "cool_away": "Cooling target, away",
+          "humidity_max": "Highest comfortable humidity",
+          "night_start": "Night starts",
+          "night_end": "Night ends"
+        }
+      }
+    },
+    "error": {
+      "band_order": "Each heating target must be below its cooling target."
+    }
+  },
+  "selector": {
+    "priority": {
+      "options": {
+        "bedroom": "Bedroom",
+        "living": "Living area",
+        "utility": "Utility or hallway"
+      }
+    }
+  },
+  "services": {
+    "apply_recommendation": {
+      "name": "Apply recommendation",
+      "description": "Carries out what a smart comfort recommendation suggests.",
+      "fields": {
+        "recommendation": {
+          "name": "Recommendation",
+          "description": "The recommendation id, from the Advice sensor."
+        },
+        "unit_id": {
+          "name": "Unit",
+          "description": "Only needed with more than one unit."
+        },
+        "entry_id": {
+          "name": "Integration entry",
+          "description": "Only needed with more than one account."
+        }
+      }
+    },
+    "dismiss_recommendation": {
+      "name": "Dismiss recommendation",
+      "description": "Hides a smart comfort recommendation for a while.",
+      "fields": {
+        "recommendation": {
+          "name": "Recommendation",
+          "description": "The recommendation id, from the Advice sensor."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long to hide it."
+        },
+        "unit_id": {
+          "name": "Unit",
+          "description": "Only needed with more than one unit."
+        },
+        "entry_id": {
+          "name": "Integration entry",
+          "description": "Only needed with more than one account."
+        }
+      }
     }
   }
 }

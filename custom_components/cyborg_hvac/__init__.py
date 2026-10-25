@@ -10,8 +10,10 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv, device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 
+from . import services as cyborg_services, ws
 from .backends.hisense_connectlife import adapter as hisense_adapter
 from .brands import get_brand
+from .comfort_manager import ComfortManager
 from .const import CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL, DOMAIN, PLATFORMS
 from .coordinator import CyborgRuntimeData, HvacCoordinator
 from .core.errors import AuthFailed, HvacError
@@ -27,6 +29,8 @@ type CyborgConfigEntry = ConfigEntry[CyborgRuntimeData]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the ConnectLife sign-in so existing entries can refresh tokens."""
     hisense_adapter.async_get_implementation(hass)
+    ws.async_register(hass)
+    cyborg_services.async_register(hass)
     return True
 
 
@@ -74,6 +78,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyborgConfigEntry) -> bo
         backend=backend,
         coordinator=coordinator,
         reload_snapshot=_reload_snapshot(entry),
+        comfort=ComfortManager(hass, entry, coordinator),
     )
     try:
         if await backend.async_start_push(coordinator.async_on_push):
@@ -84,6 +89,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: CyborgConfigEntry) -> bo
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await entry.runtime_data.comfort.async_start()
     return True
 
 
@@ -97,5 +103,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: CyborgConfigEntry) -> b
     """Unload platforms and close the backend."""
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
+        await entry.runtime_data.comfort.async_stop()
         await entry.runtime_data.coordinator.async_shutdown()
     return unloaded

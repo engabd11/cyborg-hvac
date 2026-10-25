@@ -41,3 +41,37 @@ COALESCE_SECONDS = 0.3
 OVERLAY_SECONDS = 20
 # Refresh this long after a write to confirm what the unit did.
 CONFIRM_REFRESH_SECONDS = 5
+
+# Zone subentry: room sensors and zoning preferences.
+CONF_TEMP_SENSOR = "temperature_sensor"
+CONF_HUMIDITY_SENSOR = "humidity_sensor"
+CONF_PRESENCE_SENSORS = "presence_sensors"
+CONF_WINDOW_SENSORS = "window_sensors"
+CONF_OFFSET = "comfort_offset"
+CONF_PRIORITY = "priority"
+CONF_MIN_OPENING = "min_opening"
+CONF_MAX_OPENING = "max_opening"
+CONF_SPILL = "spill"
+CONF_GUEST = "guest_zone"
+
+# Options: smart comfort inputs and targets.
+CONF_OUTDOOR_SENSOR = "outdoor_sensor"
+CONF_WEATHER = "weather_entity"
+CONF_PEOPLE = "people"
+CONF_SOLAR_SENSOR = "solar_grid_sensor"
+CONF_SOLAR_EXPORT_NEGATIVE = "solar_export_negative"
+CONF_HEAT_DAY = "heat_day"
+CONF_HEAT_NIGHT = "heat_night"
+CONF_HEAT_AWAY = "heat_away"
+CONF_COOL_DAY = "cool_day"
+CONF_COOL_NIGHT = "cool_night"
+CONF_COOL_AWAY = "cool_away"
+CONF_HUMIDITY_MAX = "humidity_max"
+CONF_NIGHT_START = "night_start"
+CONF_NIGHT_END = "night_end"
+
+# How often advice is re-evaluated, and how long a dismissal lasts by default.
+ADVICE_INTERVAL_SECONDS = 60
+FORECAST_REFRESH_MINUTES = 30
+DEFAULT_DISMISS_MINUTES = 240
+WS_SCHEMA_VERSION = 1

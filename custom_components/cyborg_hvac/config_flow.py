@@ -14,6 +14,7 @@ from homeassistant.config_entries import (
     ConfigFlowResult,
     ConfigSubentryData,
     ConfigSubentryFlow,
+    OptionsFlow,
     SubentryFlowResult,
 )
 from homeassistant.core import callback
@@ -30,16 +31,43 @@ from .const import (
     CONF_ACCOUNT_ID,
     CONF_AREA,
     CONF_BRAND,
+    CONF_COOL_AWAY,
+    CONF_COOL_DAY,
+    CONF_COOL_NIGHT,
     CONF_DEMO_ZONES,
+    CONF_GUEST,
+    CONF_HEAT_AWAY,
+    CONF_HEAT_DAY,
+    CONF_HEAT_NIGHT,
+    CONF_HUMIDITY_MAX,
+    CONF_HUMIDITY_SENSOR,
+    CONF_MAX_OPENING,
+    CONF_MIN_OPENING,
+    CONF_NIGHT_END,
+    CONF_NIGHT_START,
+    CONF_OFFSET,
+    CONF_OUTDOOR_SENSOR,
+    CONF_PEOPLE,
+    CONF_PRESENCE_SENSORS,
+    CONF_PRIORITY,
+    CONF_SCAN_INTERVAL,
+    CONF_SOLAR_EXPORT_NEGATIVE,
+    CONF_SOLAR_SENSOR,
     CONF_SOURCE_ID,
+    CONF_SPILL,
+    CONF_TEMP_SENSOR,
     CONF_TOKEN,
     CONF_UNIT_ID,
+    CONF_WEATHER,
+    CONF_WINDOW_SENSORS,
     CONF_ZONE,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     SUBENTRY_ZONE,
 )
 from .core.errors import AccountActionRequired, AuthFailed, HvacError
 from .core.model import UnitInfo
+from .logic.snapshot import ComfortSettings, Priority
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +107,12 @@ class CyborgHvacConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, d
     def logger(self) -> logging.Logger:
         """Return the flow logger."""
         return _LOGGER
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Smart comfort inputs and targets."""
+        return CyborgHvacOptionsFlow()
 
     @classmethod
     @callback
@@ -310,6 +344,84 @@ class CyborgHvacConfigFlow(config_entry_oauth2_flow.AbstractOAuth2FlowHandler, d
         return await self.async_step_hisense_connectlife()
 
 
+ZONE_SETTINGS = (
+    CONF_AREA,
+    CONF_TEMP_SENSOR,
+    CONF_HUMIDITY_SENSOR,
+    CONF_PRESENCE_SENSORS,
+    CONF_WINDOW_SENSORS,
+    CONF_OFFSET,
+    CONF_PRIORITY,
+    CONF_GUEST,
+    CONF_MIN_OPENING,
+    CONF_MAX_OPENING,
+    CONF_SPILL,
+)
+
+
+def _entity(domain: str, device_class: str | list[str] | None = None, multiple: bool = False):
+    config = selector.EntitySelectorConfig(domain=domain, multiple=multiple)
+    if device_class:
+        config = selector.EntitySelectorConfig(
+            domain=domain, device_class=device_class, multiple=multiple
+        )
+    return selector.EntitySelector(config)
+
+
+def _percent() -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0, max=100, step=5, unit_of_measurement="%", mode=selector.NumberSelectorMode.BOX
+        )
+    )
+
+
+def zone_settings_schema() -> dict:
+    """Return the optional zone fields: room sensors and zoning preferences."""
+    return {
+        vol.Optional(CONF_AREA): selector.AreaSelector(),
+        vol.Optional(CONF_TEMP_SENSOR): _entity("sensor", "temperature"),
+        vol.Optional(CONF_HUMIDITY_SENSOR): _entity("sensor", "humidity"),
+        vol.Optional(CONF_PRESENCE_SENSORS): _entity(
+            "binary_sensor", ["occupancy", "presence", "motion"], multiple=True
+        ),
+        vol.Optional(CONF_WINDOW_SENSORS): _entity(
+            "binary_sensor", ["window", "door", "opening"], multiple=True
+        ),
+        vol.Optional(CONF_OFFSET, default=0): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=-3,
+                max=3,
+                step=0.5,
+                unit_of_measurement="°C",
+                mode=selector.NumberSelectorMode.SLIDER,
+            )
+        ),
+        vol.Optional(CONF_PRIORITY, default=Priority.LIVING.value): selector.SelectSelector(
+            selector.SelectSelectorConfig(
+                options=[p.value for p in Priority], translation_key="priority"
+            )
+        ),
+        vol.Optional(CONF_GUEST, default=False): selector.BooleanSelector(),
+        vol.Optional(CONF_MIN_OPENING, default=0): _percent(),
+        vol.Optional(CONF_MAX_OPENING, default=100): _percent(),
+        vol.Optional(CONF_SPILL, default=False): selector.BooleanSelector(),
+    }
+
+
+def zone_settings(user_input: dict) -> dict:
+    """Keep only the zone settings that were filled in."""
+    data = {}
+    for key in ZONE_SETTINGS:
+        value = user_input.get(key)
+        if value in (None, "", []):
+            continue
+        if key in (CONF_MIN_OPENING, CONF_MAX_OPENING):
+            value = int(value)
+        data[key] = value
+    return data
+
+
 class ZoneSubentryFlow(ConfigSubentryFlow):
     """Add or edit a zone."""
 
@@ -341,9 +453,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
             return self.async_abort(reason="no_free_slots")
         if user_input is not None:
             unit_id, _, zone = user_input[CONF_SLOT].rpartition("|")
-            data = {CONF_UNIT_ID: unit_id, CONF_ZONE: int(zone)}
-            if area := user_input.get(CONF_AREA):
-                data[CONF_AREA] = area
+            data = {CONF_UNIT_ID: unit_id, CONF_ZONE: int(zone), **zone_settings(user_input)}
             return self.async_create_entry(
                 title=user_input[CONF_NAME],
                 data=data,
@@ -357,7 +467,7 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
                         selector.SelectSelectorConfig(options=options)
                     ),
                     vol.Required(CONF_NAME): selector.TextSelector(),
-                    vol.Optional(CONF_AREA): selector.AreaSelector(),
+                    **zone_settings_schema(),
                 }
             ),
         )
@@ -369,23 +479,137 @@ class ZoneSubentryFlow(ConfigSubentryFlow):
         entry = self._get_entry()
         subentry = self._get_reconfigure_subentry()
         if user_input is not None:
-            data = dict(subentry.data)
-            data.pop(CONF_AREA, None)
-            if area := user_input.get(CONF_AREA):
-                data[CONF_AREA] = area
+            data = {
+                CONF_UNIT_ID: subentry.data[CONF_UNIT_ID],
+                CONF_ZONE: subentry.data[CONF_ZONE],
+                **zone_settings(user_input),
+            }
             return self.async_update_and_abort(
                 entry, subentry, title=user_input[CONF_NAME], data=data
             )
         schema = vol.Schema(
             {
                 vol.Required(CONF_NAME, default=subentry.title): selector.TextSelector(),
-                vol.Optional(CONF_AREA): selector.AreaSelector(),
+                **zone_settings_schema(),
             }
         )
-        suggested = (
-            {CONF_AREA: subentry.data.get(CONF_AREA)} if subentry.data.get(CONF_AREA) else {}
-        )
+        suggested = {k: v for k, v in subentry.data.items() if k in ZONE_SETTINGS}
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(schema, suggested),
+        )
+
+
+def _temp(default: float) -> vol.Any:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=10,
+            max=32,
+            step=0.5,
+            unit_of_measurement="°C",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+
+
+class CyborgHvacOptionsFlow(OptionsFlow):
+    """House inputs for smart comfort, comfort targets, and polling."""
+
+    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Pick what to change."""
+        return self.async_show_menu(step_id="init", menu_options=["inputs", "comfort"])
+
+    def _save(self, user_input: dict[str, Any], keys: tuple[str, ...]) -> ConfigFlowResult:
+        options = {k: v for k, v in self.config_entry.options.items() if k not in keys}
+        options.update({k: v for k, v in user_input.items() if v not in (None, "", [])})
+        return self.async_create_entry(data=options)
+
+    async def async_step_inputs(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Outdoor, weather, people and solar inputs."""
+        keys = (
+            CONF_OUTDOOR_SENSOR,
+            CONF_WEATHER,
+            CONF_PEOPLE,
+            CONF_SOLAR_SENSOR,
+            CONF_SOLAR_EXPORT_NEGATIVE,
+            CONF_SCAN_INTERVAL,
+        )
+        if user_input is not None:
+            return self._save(user_input, keys)
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_OUTDOOR_SENSOR): _entity("sensor", "temperature"),
+                vol.Optional(CONF_WEATHER): _entity("weather"),
+                vol.Optional(CONF_PEOPLE): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain=["person", "device_tracker", "binary_sensor"], multiple=True
+                    )
+                ),
+                vol.Optional(CONF_SOLAR_SENSOR): _entity("sensor", "power"),
+                vol.Optional(CONF_SOLAR_EXPORT_NEGATIVE, default=True): selector.BooleanSelector(),
+                vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): (
+                    selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=15,
+                            max=300,
+                            step=5,
+                            unit_of_measurement="s",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="inputs",
+            data_schema=self.add_suggested_values_to_schema(schema, self.config_entry.options),
+        )
+
+    async def async_step_comfort(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Comfort targets for day, night and away."""
+        base = ComfortSettings()
+        defaults = {
+            CONF_HEAT_DAY: base.heat_day,
+            CONF_HEAT_NIGHT: base.heat_night,
+            CONF_HEAT_AWAY: base.heat_away,
+            CONF_COOL_DAY: base.cool_day,
+            CONF_COOL_NIGHT: base.cool_night,
+            CONF_COOL_AWAY: base.cool_away,
+        }
+        keys = (*defaults, CONF_HUMIDITY_MAX, CONF_NIGHT_START, CONF_NIGHT_END)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            for period in ("day", "night", "away"):
+                if float(user_input[f"heat_{period}"]) >= float(user_input[f"cool_{period}"]):
+                    errors["base"] = "band_order"
+            if not errors:
+                return self._save(user_input, keys)
+        fields: dict = {
+            vol.Required(key, default=value): _temp(value) for key, value in defaults.items()
+        }
+        fields[vol.Required(CONF_HUMIDITY_MAX, default=base.humidity_max)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=40,
+                    max=90,
+                    step=1,
+                    unit_of_measurement="%",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            )
+        )
+        fields[vol.Required(CONF_NIGHT_START, default=base.night_start.isoformat())] = (
+            selector.TimeSelector()
+        )
+        fields[vol.Required(CONF_NIGHT_END, default=base.night_end.isoformat())] = (
+            selector.TimeSelector()
+        )
+        return self.async_show_form(
+            step_id="comfort",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema(fields), user_input or self.config_entry.options
+            ),
+            errors=errors,
         )

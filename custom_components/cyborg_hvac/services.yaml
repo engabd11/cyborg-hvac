@@ -1,0 +1,36 @@
+apply_recommendation:
+  fields:
+    recommendation:
+      required: true
+      example: mode_heat
+      selector:
+        text:
+    unit_id:
+      selector:
+        text:
+    entry_id:
+      selector:
+        config_entry:
+          integration: cyborg_hvac
+
+dismiss_recommendation:
+  fields:
+    recommendation:
+      required: true
+      example: mode_fan_mix
+      selector:
+        text:
+    minutes:
+      default: 240
+      selector:
+        number:
+          min: 1
+          max: 10080
+          unit_of_measurement: min
+    unit_id:
+      selector:
+        text:
+    entry_id:
+      selector:
+        config_entry:
+          integration: cyborg_hvac

@@ -13,8 +13,9 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .comfort_entity import ZoneOccupiedSensor, has_presence
 from .coordinator import CyborgRuntimeData
-from .entity import CyborgEntity
+from .entity import CyborgEntity, zone_subentries
 
 
 async def async_setup_entry(
@@ -32,6 +33,12 @@ async def async_setup_entry(
         if info.capabilities.has_fault_report:
             entities.append(FaultSensor(coordinator, unit_id))
     async_add_entities(entities)
+    for subentry in zone_subentries(coordinator):
+        if has_presence(subentry):
+            async_add_entities(
+                [ZoneOccupiedSensor(coordinator, subentry)],
+                config_subentry_id=subentry.subentry_id,
+            )
 
 
 class ConnectivitySensor(CyborgEntity, BinarySensorEntity):
