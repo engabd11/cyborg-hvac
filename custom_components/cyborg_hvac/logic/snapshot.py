@@ -68,6 +68,10 @@ class ZoneInputs:
     spill: bool = False
     # Guest zones get priority while guest mode is on (living and dining areas).
     guest: bool = False
+    # Sleep zones are held at the sleep temperature while sleep mode is on.
+    sleep: bool = False
+    # True when the open window or door is a door (for wording only).
+    door_open: bool = False
 
     @property
     def has_sensor(self) -> bool:
@@ -112,6 +116,14 @@ class HouseSnapshot:
     solar_export_w: float | None = None
     period_override: Period | None = None
     guest_mode: bool = False
+    sleep_mode: bool = False
+    sleep_target: float = 22.0
+
+    def secondary(self, zone: ZoneInputs) -> bool:
+        """Return True when guest or sleep mode puts a zone second."""
+        return (self.sleep_mode and not zone.sleep) or (
+            self.guest_mode and not self.sleep_mode and not zone.guest
+        )
 
     @property
     def sensed_zones(self) -> tuple[ZoneInputs, ...]:

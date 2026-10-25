@@ -8,11 +8,13 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_PRESENCE_SENSORS
+from .const import CONF_PRESENCE_SENSORS, DEFAULT_SLEEP_TARGET
 from .entity import CyborgEntity, CyborgZoneEntity
 
 
@@ -135,6 +137,45 @@ class AutopilotSwitch(_ComfortMixin, CyborgEntity, SwitchEntity, RestoreEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable the behaviour."""
         await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, False)
+
+
+class SleepTargetNumber(_ComfortMixin, CyborgEntity, RestoreNumber):
+    """The temperature sleep mode holds the sleep zones at."""
+
+    _attr_translation_key = "sleep_target"
+    _attr_mode = NumberMode.BOX
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+
+    def __init__(self, coordinator, unit_id: str) -> None:
+        """Bind to a unit, within its setpoint range."""
+        super().__init__(coordinator, unit_id, "sleep_target")
+        caps = self.caps
+        self._attr_native_min_value = caps.min_temp
+        self._attr_native_max_value = caps.max_temp
+        self._attr_native_step = caps.temp_step
+        if caps.temperature_unit == "F":
+            self._attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last value."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self.comfort.sleep_targets[self._unit_id] = float(last.native_value)
+
+    @property
+    def available(self) -> bool:
+        """Settable even while the unit is offline."""
+        return True
+
+    @property
+    def native_value(self) -> float:
+        """Return the sleep temperature."""
+        return self.comfort.sleep_targets.get(self._unit_id, DEFAULT_SLEEP_TARGET)
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set the sleep temperature."""
+        await self.comfort.async_set_sleep_target(self._unit_id, value)
 
 
 class ZoneOccupiedSensor(_ComfortMixin, CyborgZoneEntity, BinarySensorEntity):

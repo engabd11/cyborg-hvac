@@ -25,6 +25,8 @@ from .const import (
     CONF_COOL_AWAY,
     CONF_COOL_DAY,
     CONF_COOL_NIGHT,
+    CONF_DOOR_DELAY,
+    CONF_DOOR_SENSORS,
     CONF_GUEST,
     CONF_HEAT_AWAY,
     CONF_HEAT_DAY,
@@ -33,22 +35,31 @@ from .const import (
     CONF_HUMIDITY_SENSOR,
     CONF_MAX_OPENING,
     CONF_MIN_OPENING,
+    CONF_MIN_TOTAL,
+    CONF_MIN_ZONES,
     CONF_NIGHT_END,
     CONF_NIGHT_START,
     CONF_OFFSET,
     CONF_OUTDOOR_SENSOR,
     CONF_PEOPLE,
+    CONF_PRESENCE_HOLD,
     CONF_PRESENCE_SENSORS,
     CONF_PRIORITY,
+    CONF_SLEEP_ZONE,
     CONF_SOLAR_EXPORT_NEGATIVE,
     CONF_SOLAR_SENSOR,
     CONF_SPILL,
     CONF_TEMP_SENSOR,
     CONF_UNIT_ID,
     CONF_WEATHER,
+    CONF_WINDOW_DELAY,
     CONF_WINDOW_SENSORS,
     CONF_ZONE,
     DEFAULT_DISMISS_MINUTES,
+    DEFAULT_DOOR_DELAY,
+    DEFAULT_PRESENCE_HOLD,
+    DEFAULT_SLEEP_TARGET,
+    DEFAULT_WINDOW_DELAY,
     DOMAIN,
     FORECAST_REFRESH_MINUTES,
     WS_SCHEMA_VERSION,
@@ -73,6 +84,7 @@ from .logic.guard import (
     manual_command,
     record,
 )
+from .logic.openings import OpeningMemory, openings_command
 from .logic.planner import (
     Plan,
     SolarMemory,
@@ -82,6 +94,7 @@ from .logic.planner import (
     solar_command,
 )
 from .logic.presence import PresenceMemory, presence_command
+from .logic.sleep import sleep_command
 from .logic.snapshot import (
     ComfortSettings,
     ForecastPoint,
@@ -103,7 +116,8 @@ PRESENCE_ZONING = "presence_zoning"
 ROOM_BALANCING = "room_balancing"
 WEATHER_PRECONDITION = "weather_precondition"
 SOLAR_SHIFT = "solar_shift"
-BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING, WEATHER_PRECONDITION, SOLAR_SHIFT)
+SLEEP_MODE = "sleep_mode"
+BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING, WEATHER_PRECONDITION, SOLAR_SHIFT, SLEEP_MODE)
 SAMPLE_EVERY = timedelta(minutes=5)
 SAVE_EVERY = timedelta(minutes=30)
 STORE_VERSION = 1
@@ -145,6 +159,8 @@ def settings_from_options(options: dict[str, Any]) -> ComfortSettings:
         humidity_max=float(options.get(CONF_HUMIDITY_MAX, base.humidity_max)),
         night_start=_time(options.get(CONF_NIGHT_START), base.night_start),
         night_end=_time(options.get(CONF_NIGHT_END), base.night_end),
+        min_open_zones=int(options.get(CONF_MIN_ZONES, base.min_open_zones)),
+        min_total_opening=int(options.get(CONF_MIN_TOTAL, base.min_total_opening)),
     )
 
 
@@ -160,6 +176,9 @@ class ComfortManager:
         self.snapshots: dict[str, HouseSnapshot] = {}
         self._dismissed: dict[tuple[str, str], datetime] = {}
         self.guest_modes: dict[str, bool] = {}
+        self.sleep_targets: dict[str, float] = {}
+        self._openings: dict[str, OpeningMemory] = {}
+        self._sleep_memory: dict[str, BalanceMemory] = {}
         self.autopilot: dict[str, dict[str, bool]] = {}
         self.last_action: dict[str, dict[str, Any]] = {}
         self.guard_config = GuardConfig()
@@ -228,6 +247,7 @@ class ComfortManager:
                     ids.append(data[key])
             ids.extend(data.get(CONF_PRESENCE_SENSORS) or [])
             ids.extend(data.get(CONF_WINDOW_SENSORS) or [])
+            ids.extend(data.get(CONF_DOOR_SENSORS) or [])
         return sorted(set(ids))
 
     @callback
@@ -257,7 +277,13 @@ class ComfortManager:
             self._previous[unit_id] = after
             if before is None or after is None or not self.autopilot_on(unit_id):
                 continue
-            paused = detect_override(self.guard_config, self._guard(unit_id), before, after, now)
+            guard = self._guard(unit_id)
+            paused = detect_override(self.guard_config, guard, before, after, now)
+            # The controller opens spill zones by itself; that is not a person's change.
+            for number in self._spill_zones(unit_id):
+                if f"zone{number}" in paused:
+                    guard.zone_paused_until.pop(number, None)
+                    paused.remove(f"zone{number}")
             if paused:
                 _LOGGER.debug("Autopilot paused for %s after a manual change: %s", unit_id, paused)
         self._schedule()
@@ -410,10 +436,30 @@ class ComfortManager:
                 if s is not None and s.state not in UNAVAILABLE
             ]
             if sensors:
-                occupied = any(s.state == STATE_ON for s in sensors)
-                if not occupied:
+                if any(s.state == STATE_ON for s in sensors):
+                    occupied = True
+                else:
+                    # Still sleepers and readers go quiet: only call a room empty after
+                    # every sensor has been off for the hold time.
                     vacant = (now - max(s.last_changed for s in sensors)).total_seconds() / 60
-            windows = [self.hass.states.get(e) for e in data.get(CONF_WINDOW_SENSORS) or []]
+                    hold = float(data.get(CONF_PRESENCE_HOLD, DEFAULT_PRESENCE_HOLD) or 0)
+                    occupied = vacant < hold
+                    if occupied:
+                        vacant = None
+            sleep_zone = bool(data.get(CONF_SLEEP_ZONE, False))
+            if sleep_zone and self.autopilot.get(unit_id, {}).get(SLEEP_MODE):
+                occupied, vacant = True, None
+            options = self.entry.options
+            window_open = self._open_long_enough(
+                data.get(CONF_WINDOW_SENSORS),
+                float(options.get(CONF_WINDOW_DELAY, DEFAULT_WINDOW_DELAY)),
+                now,
+            )
+            door_open = self._open_long_enough(
+                data.get(CONF_DOOR_SENSORS),
+                float(options.get(CONF_DOOR_DELAY, DEFAULT_DOOR_DELAY)),
+                now,
+            )
             try:
                 priority = Priority(data.get(CONF_PRIORITY, Priority.LIVING))
             except ValueError:
@@ -430,16 +476,37 @@ class ComfortManager:
                     humidity=_float(self.hass.states.get(data.get(CONF_HUMIDITY_SENSOR, ""))),
                     occupied=occupied,
                     vacant_minutes=vacant,
-                    window_open=any(w is not None and w.state == STATE_ON for w in windows),
+                    window_open=window_open or door_open,
+                    door_open=door_open and not window_open,
                     offset=float(data.get(CONF_OFFSET, 0) or 0),
                     priority=priority,
                     min_opening=int(data.get(CONF_MIN_OPENING, 0) or 0),
                     max_opening=int(data.get(CONF_MAX_OPENING, 100) or 100),
                     spill=bool(data.get(CONF_SPILL, False)),
                     guest=bool(data.get(CONF_GUEST, False)),
+                    sleep=sleep_zone,
                 )
             )
         return tuple(sorted(zones, key=lambda z: z.zone))
+
+    def _spill_zones(self, unit_id: str) -> set[int]:
+        return {
+            int(sub.data[CONF_ZONE])
+            for sub in zone_subentries(self.coordinator)
+            if sub.data.get(CONF_UNIT_ID) == unit_id and sub.data.get(CONF_SPILL)
+        }
+
+    def _open_long_enough(
+        self, entity_ids: list[str] | None, minutes: float, now: datetime
+    ) -> bool:
+        """Return True when any sensor has been open for at least ``minutes``."""
+        for entity_id in entity_ids or []:
+            state = self.hass.states.get(entity_id)
+            if state is None or state.state != STATE_ON:
+                continue
+            if (now - state.last_changed).total_seconds() / 60 >= minutes:
+                return True
+        return False
 
     def build_snapshot(self, unit_id: str) -> HouseSnapshot | None:
         """Gather every input for one unit."""
@@ -461,6 +528,8 @@ class ComfortManager:
             away_minutes=away_minutes,
             solar_export_w=self._solar_export(),
             guest_mode=self.guest_modes.get(unit_id, False),
+            sleep_mode=bool(self.autopilot.get(unit_id, {}).get(SLEEP_MODE)),
+            sleep_target=self.sleep_targets.get(unit_id, DEFAULT_SLEEP_TARGET),
         )
 
     # Advice -----------------------------------------------------------------------
@@ -511,6 +580,20 @@ class ComfortManager:
         paused = {n for n in guard.zone_paused_until if guard.zone_paused(n, now)}
         command = Command()
         plan = self.plans.get(unit_id) or Plan()
+        openings = openings_command(snapshot, self._openings.setdefault(unit_id, OpeningMemory()))
+        if enabled.get(SLEEP_MODE):
+            # Sleep owns the unit until it is switched off.
+            command = sleep_command(
+                snapshot, self._sleep_memory.setdefault(unit_id, BalanceMemory()), minutes
+            )
+            command = Command(
+                power=command.power,
+                mode=command.mode,
+                target_temp=command.target_temp,
+                zones={n: c for n, c in command.zones.items() if n not in paused},
+            ).merge(Command(zones=openings.zones))
+            await self._async_send_autopilot(unit_id, snapshot, guard, command, now)
+            return
         if enabled.get(WEATHER_PRECONDITION):
             command = precondition_command(snapshot, plan.blocks)
         solar_active = False
@@ -533,6 +616,12 @@ class ComfortManager:
                     snapshot, self._presence_memory.setdefault(unit_id, PresenceMemory())
                 )
             )
+        command = command.merge(openings)
+        await self._async_send_autopilot(unit_id, snapshot, guard, command, now)
+
+    async def _async_send_autopilot(
+        self, unit_id: str, snapshot: HouseSnapshot, guard: GuardState, command: Command, now
+    ) -> None:
         allowed = filter_command(self.guard_config, guard, snapshot, command, now)
         if allowed is None:
             return
@@ -549,6 +638,16 @@ class ComfortManager:
         self.autopilot.setdefault(unit_id, {})[behaviour] = enabled
         if not enabled:
             self._balance.pop(unit_id, None)
+            self._sleep_memory.pop(unit_id, None)
+        if behaviour == SLEEP_MODE:
+            # Act straight away rather than waiting for the next minute.
+            self._last_run.pop(unit_id, None)
+        await self._async_evaluate()
+
+    async def async_set_sleep_target(self, unit_id: str, value: float) -> None:
+        """Set the temperature sleep mode holds the sleep zones at."""
+        self.sleep_targets[unit_id] = value
+        self._last_run.pop(unit_id, None)
         await self._async_evaluate()
 
     async def async_pause(self, unit_id: str | None, minutes: int) -> None:
@@ -670,6 +769,8 @@ class ComfortManager:
                     "occupied": zone.occupied,
                     "window_open": zone.window_open,
                     "guest": zone.guest,
+                    "sleep": zone.sleep,
+                    "door_open": zone.door_open,
                     "paused": self._guard(unit_id).zone_paused(zone.zone, dt_util.utcnow()),
                     "band": {"low": zband.low, "high": zband.high},
                     "demand": zone_demand(snapshot, zone),
@@ -690,6 +791,7 @@ class ComfortManager:
                 "entities": {
                     "advice": entity_id("sensor", f"{unit_id}_advice"),
                     "guest_mode": entity_id("switch", f"{unit_id}_guest_mode"),
+                    "sleep_target": entity_id("number", f"{unit_id}_sleep_target"),
                     **{b: entity_id("switch", f"{unit_id}_{b}") for b in BEHAVIOURS},
                 },
                 "online": unit.online,
@@ -719,6 +821,8 @@ class ComfortManager:
                 "demand": round(house_demand(snapshot)),
                 "solar_export_w": snapshot.solar_export_w,
                 "guest_mode": snapshot.guest_mode,
+                "sleep_mode": snapshot.sleep_mode,
+                "sleep_target": snapshot.sleep_target,
             },
             "forecast": [
                 {"time": p.time.isoformat(), "temperature": p.temperature, "condition": p.condition}

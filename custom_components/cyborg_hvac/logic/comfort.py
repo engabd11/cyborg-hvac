@@ -11,6 +11,8 @@ from .snapshot import PRIORITY_WEIGHT, HouseSnapshot, Period, ZoneInputs
 FULL_DEMAND_DEGREES = 2.0
 # Degrees outside the band before a zone counts as needing heat or cool.
 NEED_MARGIN = 0.5
+# Sleep zones are held within this many degrees of the sleep temperature.
+SLEEP_TOLERANCE = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +63,11 @@ def zone_band(snapshot: HouseSnapshot, zone: ZoneInputs, period: Period | None =
     An empty zone in an occupied house uses the away band, so it is kept
     tolerable rather than comfortable.
     """
+    if snapshot.sleep_mode and zone.sleep:
+        target = snapshot.sleep_target
+        return Band(round(target - SLEEP_TOLERANCE, 1), round(target + SLEEP_TOLERANCE, 1))
     period = period or current_period(snapshot)
-    secondary = snapshot.guest_mode and not zone.guest
+    secondary = snapshot.secondary(zone)
     if (zone.occupied is False or secondary) and period is not Period.AWAY:
         base = house_band(snapshot, Period.AWAY)
         live = house_band(snapshot, period)
@@ -93,6 +98,8 @@ def zone_demand(snapshot: HouseSnapshot, zone: ZoneInputs) -> int:
 def zone_weight(snapshot: HouseSnapshot, zone: ZoneInputs) -> float:
     """Return how much a zone counts when deciding what the unit should do."""
     weight = PRIORITY_WEIGHT[zone.priority]
+    if snapshot.sleep_mode:
+        return 2.0 if zone.sleep else weight * 0.05
     if snapshot.guest_mode:
         return weight * (1.5 if zone.guest else 0.3)
     if zone.occupied is False:
@@ -129,7 +136,9 @@ def needs(snapshot: HouseSnapshot) -> tuple[bool, bool]:
     Without room sensors the unit's own reading stands in for the house.
     """
     zones = [z for z in snapshot.sensed_zones if z.occupied is not False]
-    if snapshot.guest_mode:
+    if snapshot.sleep_mode:
+        zones = [z for z in snapshot.sensed_zones if z.sleep] or zones
+    elif snapshot.guest_mode:
         zones = [z for z in snapshot.sensed_zones if z.guest] or zones
     if not zones and not snapshot.sensed_zones:
         temp = snapshot.unit.current_temp

@@ -51,7 +51,7 @@ def presence_command(s: HouseSnapshot, memory: PresenceMemory) -> Command:
     for zone in s.zones:
         if s.guest_mode and zone.guest:
             continue
-        if zone.occupied is True and not zone.on:
+        if zone.occupied is True and not zone.on and not zone.window_open:
             zones[zone.zone] = ZoneCommand(on=True, opening=zone.opening or zone.max_opening)
         elif (
             zone.occupied is False

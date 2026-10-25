@@ -8,6 +8,7 @@ from homeassistant.const import EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .comfort_entity import SleepTargetNumber
 from .coordinator import CyborgRuntimeData
 from .core.model import Command, Feature, FeatureKind
 from .entity import CyborgEntity
@@ -20,6 +21,7 @@ async def async_setup_entry(
 ) -> None:
     """Add a number for every numeric feature."""
     coordinator = entry.runtime_data.coordinator
+    async_add_entities(SleepTargetNumber(coordinator, unit_id) for unit_id in coordinator.units)
     async_add_entities(
         FeatureNumber(coordinator, unit_id, feature)
         for unit_id, info in coordinator.units.items()

@@ -375,12 +375,13 @@ def rule_zoning(s: HouseSnapshot) -> Iterable[Recommendation]:
         if not (zone.on and zone.opening > 0):
             continue
         if zone.window_open and airflow_ok(s, _without(s, zone)):
+            what = "door" if zone.door_open else "window"
             yield Recommendation(
                 f"zone_window_{zone.zone}",
                 "zoning",
                 Severity.SUGGEST,
-                f"Close {zone.name} while its window is open",
-                "Conditioned air is escaping through the open window.",
+                f"Close {zone.name} while its {what} is open",
+                f"Conditioned air is escaping through the open {what}.",
                 Command(zones={zone.zone: ZoneCommand(on=False)}),
                 zone.zone,
             )
@@ -427,7 +428,7 @@ def rule_zoning(s: HouseSnapshot) -> Iterable[Recommendation]:
 
 def rule_guest(s: HouseSnapshot) -> Iterable[Recommendation]:
     """Give guest zones full airflow and trim the rest, keeping the airflow floor."""
-    if not s.guest_mode or not s.unit.power or not s.zones:
+    if not s.guest_mode or s.sleep_mode or not s.unit.power or not s.zones:
         return
     guests = [z for z in s.zones if z.guest]
     if not guests:

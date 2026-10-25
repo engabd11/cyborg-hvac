@@ -62,6 +62,7 @@ def balance_command(
         for z in s.zones
         if z.has_sensor
         and z.on
+        and not z.window_open
         and z.zone not in paused
         and not (s.guest_mode and not z.guest and z.occupied is not True)
     ]

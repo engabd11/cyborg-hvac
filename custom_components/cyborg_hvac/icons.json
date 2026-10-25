@@ -39,6 +39,9 @@
       },
       "guest_mode": {
         "default": "mdi:account-group"
+      },
+      "sleep_mode": {
+        "default": "mdi:bed-clock"
       }
     },
     "select": {
@@ -49,6 +52,9 @@
     "number": {
       "temp_offset": {
         "default": "mdi:thermometer-plus"
+      },
+      "sleep_target": {
+        "default": "mdi:thermometer-lines"
       }
     },
     "sensor": {

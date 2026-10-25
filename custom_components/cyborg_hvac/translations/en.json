@@ -86,19 +86,25 @@
             "temperature_sensor": "Room temperature sensor",
             "humidity_sensor": "Room humidity sensor",
             "presence_sensors": "Presence or motion sensors",
-            "window_sensors": "Window or door sensors",
+            "window_sensors": "Window sensors",
             "comfort_offset": "Comfort offset",
             "priority": "Room type",
             "guest_zone": "Guest zone",
             "min_opening": "Minimum opening",
             "max_opening": "Maximum opening",
-            "spill": "Spill zone"
+            "spill": "Spill zone",
+            "door_sensors": "Door sensors",
+            "presence_hold": "Presence hold",
+            "sleep_zone": "Sleep zone"
           },
           "data_description": {
             "comfort_offset": "Shifts this room's comfort range, for example 1 degree cooler for a bedroom.",
             "guest_zone": "Guest mode gives this zone priority. Use it for living and dining areas.",
-            "spill": "May be opened to keep enough airflow when other zones close.",
-            "min_opening": "The smallest opening smart comfort will set while this zone is on."
+            "spill": "May be opened to keep enough airflow when other zones close. Mark the zone your installer set as spill on the controller.",
+            "min_opening": "The smallest opening smart comfort will set while this zone is on.",
+            "door_sensors": "Sliding and hinged doors. A door counts as open only after the door delay, so walking through does nothing.",
+            "presence_hold": "How long every presence sensor must stay quiet before the room counts as empty. Still sleepers often go undetected for a while.",
+            "sleep_zone": "Sleep mode holds this room at the sleep temperature, whatever the rest of the house does."
           }
         },
         "reconfigure": {
@@ -109,19 +115,25 @@
             "temperature_sensor": "Room temperature sensor",
             "humidity_sensor": "Room humidity sensor",
             "presence_sensors": "Presence or motion sensors",
-            "window_sensors": "Window or door sensors",
+            "window_sensors": "Window sensors",
             "comfort_offset": "Comfort offset",
             "priority": "Room type",
             "guest_zone": "Guest zone",
             "min_opening": "Minimum opening",
             "max_opening": "Maximum opening",
-            "spill": "Spill zone"
+            "spill": "Spill zone",
+            "door_sensors": "Door sensors",
+            "presence_hold": "Presence hold",
+            "sleep_zone": "Sleep zone"
           },
           "data_description": {
             "comfort_offset": "Shifts this room's comfort range, for example 1 degree cooler for a bedroom.",
             "guest_zone": "Guest mode gives this zone priority. Use it for living and dining areas.",
-            "spill": "May be opened to keep enough airflow when other zones close.",
-            "min_opening": "The smallest opening smart comfort will set while this zone is on."
+            "spill": "May be opened to keep enough airflow when other zones close. Mark the zone your installer set as spill on the controller.",
+            "min_opening": "The smallest opening smart comfort will set while this zone is on.",
+            "door_sensors": "Sliding and hinged doors. A door counts as open only after the door delay, so walking through does nothing.",
+            "presence_hold": "How long every presence sensor must stay quiet before the room counts as empty. Still sleepers often go undetected for a while.",
+            "sleep_zone": "Sleep mode holds this room at the sleep temperature, whatever the rest of the house does."
           }
         }
       },
@@ -205,6 +217,9 @@
       },
       "solar_shift": {
         "name": "Autopilot: solar shifting"
+      },
+      "sleep_mode": {
+        "name": "Autopilot: sleep"
       }
     },
     "select": {
@@ -222,6 +237,9 @@
     "number": {
       "temp_offset": {
         "name": "Temperature offset"
+      },
+      "sleep_target": {
+        "name": "Sleep temperature"
       }
     },
     "sensor": {
@@ -300,11 +318,19 @@
           "people": "People (home or away)",
           "solar_grid_sensor": "Grid power sensor",
           "solar_export_negative": "Grid power is negative while exporting",
-          "scan_interval": "Polling interval"
+          "scan_interval": "Polling interval",
+          "window_delay": "Window delay",
+          "door_delay": "Door delay",
+          "min_open_zones": "Fewest open zones",
+          "min_total_opening": "Least total opening"
         },
         "data_description": {
           "solar_grid_sensor": "Used to spot spare solar. Most inverters report export as negative grid power.",
-          "people": "Person entities, trackers or presence sensors that are on while someone is home."
+          "people": "Person entities, trackers or presence sensors that are on while someone is home.",
+          "window_delay": "How long a window stays open before autopilot closes its zone.",
+          "door_delay": "How long a door stays open before autopilot closes its zone. Longer than windows, because doors are walked through.",
+          "min_open_zones": "Autopilot never goes below this many open zones while the unit runs. Only lower it if your installer says one zone is safe.",
+          "min_total_opening": "The open zones' openings added together must stay at or above this, so the fan always has enough duct."
         }
       },
       "comfort": {

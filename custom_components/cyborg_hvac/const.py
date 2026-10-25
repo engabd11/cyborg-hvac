@@ -53,6 +53,10 @@ CONF_MIN_OPENING = "min_opening"
 CONF_MAX_OPENING = "max_opening"
 CONF_SPILL = "spill"
 CONF_GUEST = "guest_zone"
+CONF_SLEEP_ZONE = "sleep_zone"
+CONF_DOOR_SENSORS = "door_sensors"
+CONF_PRESENCE_HOLD = "presence_hold"
+DEFAULT_PRESENCE_HOLD = 15
 
 # Options: smart comfort inputs and targets.
 CONF_OUTDOOR_SENSOR = "outdoor_sensor"
@@ -69,6 +73,13 @@ CONF_COOL_AWAY = "cool_away"
 CONF_HUMIDITY_MAX = "humidity_max"
 CONF_NIGHT_START = "night_start"
 CONF_NIGHT_END = "night_end"
+CONF_WINDOW_DELAY = "window_delay"
+CONF_DOOR_DELAY = "door_delay"
+CONF_MIN_ZONES = "min_open_zones"
+CONF_MIN_TOTAL = "min_total_opening"
+DEFAULT_WINDOW_DELAY = 2
+DEFAULT_DOOR_DELAY = 5
+DEFAULT_SLEEP_TARGET = 22.0
 
 # How often advice is re-evaluated, and how long a dismissal lasts by default.
 ADVICE_INTERVAL_SECONDS = 60

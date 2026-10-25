@@ -35,6 +35,8 @@ from .const import (
     CONF_COOL_DAY,
     CONF_COOL_NIGHT,
     CONF_DEMO_ZONES,
+    CONF_DOOR_DELAY,
+    CONF_DOOR_SENSORS,
     CONF_GUEST,
     CONF_HEAT_AWAY,
     CONF_HEAT_DAY,
@@ -43,14 +45,18 @@ from .const import (
     CONF_HUMIDITY_SENSOR,
     CONF_MAX_OPENING,
     CONF_MIN_OPENING,
+    CONF_MIN_TOTAL,
+    CONF_MIN_ZONES,
     CONF_NIGHT_END,
     CONF_NIGHT_START,
     CONF_OFFSET,
     CONF_OUTDOOR_SENSOR,
     CONF_PEOPLE,
+    CONF_PRESENCE_HOLD,
     CONF_PRESENCE_SENSORS,
     CONF_PRIORITY,
     CONF_SCAN_INTERVAL,
+    CONF_SLEEP_ZONE,
     CONF_SOLAR_EXPORT_NEGATIVE,
     CONF_SOLAR_SENSOR,
     CONF_SOURCE_ID,
@@ -59,9 +65,13 @@ from .const import (
     CONF_TOKEN,
     CONF_UNIT_ID,
     CONF_WEATHER,
+    CONF_WINDOW_DELAY,
     CONF_WINDOW_SENSORS,
     CONF_ZONE,
+    DEFAULT_DOOR_DELAY,
+    DEFAULT_PRESENCE_HOLD,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_WINDOW_DELAY,
     DOMAIN,
     SUBENTRY_ZONE,
 )
@@ -349,10 +359,13 @@ ZONE_SETTINGS = (
     CONF_TEMP_SENSOR,
     CONF_HUMIDITY_SENSOR,
     CONF_PRESENCE_SENSORS,
+    CONF_PRESENCE_HOLD,
     CONF_WINDOW_SENSORS,
+    CONF_DOOR_SENSORS,
     CONF_OFFSET,
     CONF_PRIORITY,
     CONF_GUEST,
+    CONF_SLEEP_ZONE,
     CONF_MIN_OPENING,
     CONF_MAX_OPENING,
     CONF_SPILL,
@@ -385,8 +398,20 @@ def zone_settings_schema() -> dict:
         vol.Optional(CONF_PRESENCE_SENSORS): _entity(
             "binary_sensor", ["occupancy", "presence", "motion"], multiple=True
         ),
+        vol.Optional(CONF_PRESENCE_HOLD, default=DEFAULT_PRESENCE_HOLD): selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=60,
+                step=1,
+                unit_of_measurement="min",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        ),
         vol.Optional(CONF_WINDOW_SENSORS): _entity(
-            "binary_sensor", ["window", "door", "opening"], multiple=True
+            "binary_sensor", ["window", "opening"], multiple=True
+        ),
+        vol.Optional(CONF_DOOR_SENSORS): _entity(
+            "binary_sensor", ["door", "garage_door", "opening"], multiple=True
         ),
         vol.Optional(CONF_OFFSET, default=0): selector.NumberSelector(
             selector.NumberSelectorConfig(
@@ -403,6 +428,7 @@ def zone_settings_schema() -> dict:
             )
         ),
         vol.Optional(CONF_GUEST, default=False): selector.BooleanSelector(),
+        vol.Optional(CONF_SLEEP_ZONE, default=False): selector.BooleanSelector(),
         vol.Optional(CONF_MIN_OPENING, default=0): _percent(),
         vol.Optional(CONF_MAX_OPENING, default=100): _percent(),
         vol.Optional(CONF_SPILL, default=False): selector.BooleanSelector(),
@@ -416,7 +442,7 @@ def zone_settings(user_input: dict) -> dict:
         value = user_input.get(key)
         if value in (None, "", []):
             continue
-        if key in (CONF_MIN_OPENING, CONF_MAX_OPENING):
+        if key in (CONF_MIN_OPENING, CONF_MAX_OPENING, CONF_PRESENCE_HOLD):
             value = int(value)
         data[key] = value
     return data
@@ -512,6 +538,18 @@ def _temp(default: float) -> vol.Any:
     )
 
 
+def _minutes(maximum: int) -> selector.NumberSelector:
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0,
+            max=maximum,
+            step=1,
+            unit_of_measurement="min",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+
+
 class CyborgHvacOptionsFlow(OptionsFlow):
     """House inputs for smart comfort, comfort targets, and polling."""
 
@@ -532,6 +570,10 @@ class CyborgHvacOptionsFlow(OptionsFlow):
             CONF_PEOPLE,
             CONF_SOLAR_SENSOR,
             CONF_SOLAR_EXPORT_NEGATIVE,
+            CONF_WINDOW_DELAY,
+            CONF_DOOR_DELAY,
+            CONF_MIN_ZONES,
+            CONF_MIN_TOTAL,
             CONF_SCAN_INTERVAL,
         )
         if user_input is not None:
@@ -547,6 +589,22 @@ class CyborgHvacOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(CONF_SOLAR_SENSOR): _entity("sensor", "power"),
                 vol.Optional(CONF_SOLAR_EXPORT_NEGATIVE, default=True): selector.BooleanSelector(),
+                vol.Optional(CONF_WINDOW_DELAY, default=DEFAULT_WINDOW_DELAY): _minutes(30),
+                vol.Optional(CONF_DOOR_DELAY, default=DEFAULT_DOOR_DELAY): _minutes(60),
+                vol.Optional(CONF_MIN_ZONES, default=2): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1, max=4, step=1, mode=selector.NumberSelectorMode.BOX
+                    )
+                ),
+                vol.Optional(CONF_MIN_TOTAL, default=150): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=50,
+                        max=400,
+                        step=10,
+                        unit_of_measurement="%",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
                 vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): (
                     selector.NumberSelector(
                         selector.NumberSelectorConfig(

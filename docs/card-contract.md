@@ -20,6 +20,7 @@ The subscription survives the integration reloading (for example after a zone is
   "unit": {
     "id": "…", "name": "Duct Air Conditioner", "device_id": "…", "climate": "climate.duct_air_conditioner",
     "entities": {"advice": "sensor.duct_air_conditioner_advice", "guest_mode": "switch.duct_air_conditioner_guest_mode",
+                 "sleep_mode": "switch.…", "sleep_target": "number.duct_air_conditioner_sleep_temperature",
                  "presence_zoning": "switch.…", "room_balancing": "switch.…", "weather_precondition": "switch.…", "solar_shift": "switch.…"},
     "online": true, "power": true, "mode": "heat", "target": 22.0, "current": 21.0, "fan": "auto",
     "features": {"powerful": false, "eco": true, "quiet": false},
@@ -28,12 +29,13 @@ The subscription survives the integration reloading (for example after a zone is
   },
   "zones": [
     {"zone": 1, "name": "MASTER", "device_id": "…", "on": true, "opening": 100,
-     "temperature": 21.4, "humidity": 52, "occupied": true, "window_open": false, "guest": false,
+     "temperature": 21.4, "humidity": 52, "occupied": true, "window_open": false, "door_open": false, "guest": false, "sleep": true,
      "band": {"low": 20.0, "high": 24.0}, "demand": 0,
      "entities": {"damper": "cover.master", "power": "switch.master_power"}}
   ],
   "house": {"period": "day", "band": {"low": 20.0, "high": 24.0}, "indoor": 21.3, "outdoor": 14.5,
-            "anyone_home": true, "demand": 12, "solar_export_w": 2400, "guest_mode": false},
+            "anyone_home": true, "demand": 12, "solar_export_w": 2400, "guest_mode": false,
+            "sleep_mode": false, "sleep_target": 23.0},
   "forecast": [{"time": "2026-10-25T15:00:00+11:00", "temperature": 18.0, "condition": "sunny"}],
   "advice": [{"id": "mode_heat", "category": "mode", "severity": "suggest", "title": "Heating recommended",
               "reason": "Rooms are below 20 °C. Heat to 21 °C.", "zone": null,
@@ -55,6 +57,7 @@ The subscription survives the integration reloading (for example after a zone is
 - `occupied` is `null` when a zone has no presence sensor.
 - `band` is the comfortable range for that zone right now (period, presence, guest mode and offset applied).
 - Zones carry `paused: true` while a manual change holds autopilot for them.
+- `window_open` is true once a window or door has stayed open past its delay; `door_open` says it is a door.
 - Plan block kinds: `preheat`, `precool` (weather pre-conditioning) and `solar` (banking while exporting).
 - `model.confident` turns true once a zone has about three hours of learning in each direction.
 

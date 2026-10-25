@@ -6,7 +6,7 @@ Cyborg HVAC can run your ducted system the way a careful owner would: the right 
 
 1. **House sensors and weather** (integration page, **Configure**): an outdoor temperature sensor, a weather forecast (the BOM integration works well), the people who live there, and a grid power sensor so spare solar can be spotted.
 2. **Comfort targets** (same place): heating and cooling targets for day, night and away, the highest comfortable humidity, and when night starts and ends. Below the heating target a room is too cold; above the cooling target it is too warm; in between is comfortable.
-3. **Each zone** (the zone's settings): its room temperature and humidity sensors, presence or motion sensors, window or door sensors, a comfort offset (for example a bedroom 1 degree cooler), its room type, whether it is a guest zone, opening limits, and whether it may be opened to keep airflow up (a spill zone).
+3. **Each zone** (the zone's settings): its room temperature and humidity sensors, presence or motion sensors and how long they may stay quiet before the room counts as empty (presence hold, 15 minutes by default), window sensors, door sensors, a comfort offset (for example a bedroom 1 degree cooler), its room type, whether it is a guest zone or a sleep zone, opening limits, and whether it is a spill zone. Mark the zone your installer set as spill on the controller (on the HACZ01 it is in the installer menu).
 
 Anything you leave out simply switches off the advice that needs it.
 
@@ -31,20 +31,32 @@ Apply a recommendation from the card or with `cyborg_hvac.apply_recommendation`;
 
 Mark the living and dining zones as guest zones. With **Guest mode** on, they get full comfort and priority, and the other zones only need to stay tolerable, so the unit works for the rooms your guests are in.
 
+## Windows and doors
+
+A window counts as open after 2 minutes and a door after 5 (both adjustable in the house settings), so walking through a sliding door does nothing. Once one stays open, the advice suggests closing that zone, and any autopilot that is on closes it and leaves it out of balancing, then puts it back when the window or door shuts. If every open zone is open to outside, the unit pauses until one closes.
+
+## Sleep
+
+Turn on **Autopilot: sleep** at bedtime and set **Sleep temperature** (for example 23 °C). Sleep zones get full air and are held at that temperature whatever the rest of the house does: the unit's mode and setpoint follow the bedroom alone, and the other zones close down as far as the airflow floor allows, keeping the spill zone as the second air path. While sleep is on, sleep zones always count as occupied, and sleep takes over from the other behaviours until you switch it off.
+
+## Airflow floor
+
+While the unit runs, autopilot keeps at least 2 zones open and their openings added together at 150% or more, so the fan always has enough duct. Both are adjustable in the house settings. A spill zone set by your installer already protects the fan; only lower the floor if your installer confirms one zone on its own is safe.
+
 ## Autopilot
 
-Four switches, each off until you turn it on:
+Five switches, each off until you turn it on (sleep is described above):
 
 | Behaviour | What it does |
 |---|---|
-| Presence zoning | Opens rooms people are in, trims or closes rooms empty for 30 minutes, sets back or turns off while everyone is out, and puts things back when someone returns. |
+| Presence zoning | Opens rooms people are in, trims or closes rooms empty for 30 minutes (after the presence hold), sets back or turns off while everyone is out, and puts things back when someone returns. |
 | Room balancing | Shares air by need so every room holds its range: the room furthest from comfort gets full air, others less. It also moves the unit's setpoint, because the unit only measures return air, which reads differently from the rooms. |
 | Weather pre-conditioning | Uses the hourly forecast and what it has learned about your rooms to start early, so rooms are comfortable when night or morning begins, or before a heat spike. |
 | Solar shifting | While you export spare solar, cools or warms up to a degree further within comfort, and puts things back when the surplus ends. |
 
 Autopilot always stays inside guard rails: it never closes the last zones, keeps enough airflow for the fan, waits at least 8 minutes between turning the compressor on and off, spaces setpoint changes, and limits how often it writes to the cloud.
 
-**It respects people.** If someone changes a zone or the unit in Home Assistant, the ConnectLife app or on the wall controller, autopilot leaves that alone for 2 hours. The card marks held zones with a hand. **Resume** (or `cyborg_hvac.resume_autopilot`) ends holds early; **Pause 2 h** (or `cyborg_hvac.pause_autopilot`) holds everything.
+**It respects people.** If someone changes a zone or the unit in Home Assistant, the ConnectLife app or on the wall controller, autopilot leaves that alone for 2 hours. The controller opening a spill zone by itself does not count. The card marks held zones with a hand. **Resume** (or `cyborg_hvac.resume_autopilot`) ends holds early; **Pause 2 h** (or `cyborg_hvac.pause_autopilot`) holds everything.
 
 ## Learning
 
