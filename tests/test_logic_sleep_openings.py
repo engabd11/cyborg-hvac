@@ -159,3 +159,31 @@ def test_guest_focus_steps_aside_in_sleep_mode():
     s = snap(zones, outdoor_temp=10.0, guest_mode=True, sleep_mode=True)
     assert "guest_focus" not in [r.id for r in evaluate(s)]
     assert "guest_focus" in [r.id for r in evaluate(replace(s, sleep_mode=False))]
+
+
+def test_bedtime_never_heats_a_bedroom_that_is_already_warm():
+    # The reported case: bedtime at 20.5, bedroom 21.5, return air warmer still
+    # because it had been measuring the whole house.
+    zones = (z(1, 21.5, sleep=True, occupied=True), z(2, 22.0, spill=True), z(3, 23.5))
+    s = snap(zones, target=22.0, current=23.0, sleep_mode=True, sleep_target=20.5)
+    command = sleep_command(s, BalanceMemory(), 1.0)
+    assert command.target_temp is not None
+    assert command.target_temp <= 20.5  # at or below bedtime, so the unit idles
+    assert command.mode is None  # one degree warm is not worth switching to cooling
+
+
+def test_bedtime_still_corrects_for_return_air_when_the_room_is_short():
+    zones = (z(1, 19.5, sleep=True, occupied=True), z(2, 21.0, spill=True))
+    s = snap(zones, target=20.5, current=21.0, sleep_mode=True, sleep_target=20.5)
+    command = sleep_command(s, BalanceMemory(), 1.0)
+    assert command.target_temp > 20.5
+
+
+def test_bedtime_never_cools_a_bedroom_that_is_already_cool():
+    zones = (z(1, 22.0, sleep=True, occupied=True), z(2, 24.0, spill=True))
+    s = snap(
+        zones, mode=HvacMode.COOL, target=23.0, current=21.5, sleep_mode=True, sleep_target=23.0
+    )
+    command = sleep_command(s, BalanceMemory(), 1.0)
+    assert command.target_temp is not None
+    assert command.target_temp >= 23.0

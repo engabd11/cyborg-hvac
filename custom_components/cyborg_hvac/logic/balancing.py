@@ -24,6 +24,7 @@ MAX_MOVE = 30
 BIAS_LIMIT = 3.0
 SETPOINT_SPAN = 4.0  # how far above (heat) or below (cool) the band the unit may be set
 SHORTFALL_GAIN = 0.75  # extra setpoint per degree the neediest room is short
+OVERSHOOT_BACKOFF = 2.0  # most the setpoint eases off the aim when rooms overshoot
 
 
 @dataclass(slots=True)
@@ -132,17 +133,46 @@ def smart_setpoint(
         neediest = max(aim(s, z, mode) - z.temperature for z in occupied)  # type: ignore[operator]
         base = max(aim(s, z, mode) for z in occupied)
         trim = _trim(memory, neediest, minutes)
-        target = base + bias + SHORTFALL_GAIN * max(0.0, neediest) + trim
+        target = (
+            base
+            + _lift(bias, neediest)
+            + SHORTFALL_GAIN * max(0.0, neediest)
+            - _backoff(neediest)
+            + trim
+        )
         band_low = min(zone_band(s, z).low for z in occupied)
         target = min(target, band_low + SETPOINT_SPAN)
     else:
         neediest = max(z.temperature - aim(s, z, mode) for z in occupied)  # type: ignore[operator]
         base = min(aim(s, z, mode) for z in occupied)
         trim = _trim(memory, neediest, minutes)
-        target = base + bias - SHORTFALL_GAIN * max(0.0, neediest) - trim
+        target = (
+            base
+            - _lift(-bias, neediest)
+            - SHORTFALL_GAIN * max(0.0, neediest)
+            + _backoff(neediest)
+            - trim
+        )
         band_high = max(zone_band(s, z).high for z in occupied)
         target = max(target, band_high - SETPOINT_SPAN)
     return s.caps.round_temp(target)
+
+
+def _lift(bias: float, shortfall: float) -> float:
+    """Return air correction, signed toward more output.
+
+    Correcting toward less output always applies. Correcting toward more output
+    only helps a room that is short, so it fades out as the room passes its aim:
+    a bedroom already warm must never get a hotter setpoint from warm return air.
+    """
+    if bias <= 0:
+        return bias
+    return bias * max(0.0, min(1.0, 1.0 + shortfall / SATISFIED_MARGIN))
+
+
+def _backoff(shortfall: float) -> float:
+    """How far to ease the setpoint off once every room is past its aim."""
+    return min(OVERSHOOT_BACKOFF, SHORTFALL_GAIN * max(0.0, -shortfall - SATISFIED_MARGIN))
 
 
 TRIM_RATE = 0.02  # degrees of setpoint per degree-minute of shortfall
