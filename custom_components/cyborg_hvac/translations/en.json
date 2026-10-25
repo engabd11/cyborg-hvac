@@ -193,6 +193,12 @@
       },
       "guest_mode": {
         "name": "Guest mode"
+      },
+      "presence_zoning": {
+        "name": "Autopilot: presence zoning"
+      },
+      "room_balancing": {
+        "name": "Autopilot: room balancing"
       }
     },
     "select": {
@@ -333,6 +339,38 @@
           "name": "Recommendation",
           "description": "The recommendation id, from the Advice sensor."
         },
+        "unit_id": {
+          "name": "Unit",
+          "description": "Only needed with more than one unit."
+        },
+        "entry_id": {
+          "name": "Integration entry",
+          "description": "Only needed with more than one account."
+        }
+      }
+    },
+    "pause_autopilot": {
+      "name": "Pause autopilot",
+      "description": "Stops smart comfort from changing the unit and zones for a while.",
+      "fields": {
+        "minutes": {
+          "name": "Minutes",
+          "description": "How long to pause."
+        },
+        "unit_id": {
+          "name": "Unit",
+          "description": "Only needed with more than one unit."
+        },
+        "entry_id": {
+          "name": "Integration entry",
+          "description": "Only needed with more than one account."
+        }
+      }
+    },
+    "resume_autopilot": {
+      "name": "Resume autopilot",
+      "description": "Ends pauses, including those started by a manual change.",
+      "fields": {
         "unit_id": {
           "name": "Unit",
           "description": "Only needed with more than one unit."

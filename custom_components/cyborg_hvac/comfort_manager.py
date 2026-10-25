@@ -52,8 +52,10 @@ from .const import (
     FORECAST_REFRESH_MINUTES,
     WS_SCHEMA_VERSION,
 )
+from .core.model import Command
 from .entity import zone_subentries
-from .logic.advisor import Recommendation, evaluate
+from .logic.advisor import Recommendation, command_as_dict, evaluate
+from .logic.balancing import BalanceMemory, balance_command
 from .logic.comfort import (
     current_period,
     house_band,
@@ -62,6 +64,15 @@ from .logic.comfort import (
     zone_band,
     zone_demand,
 )
+from .logic.guard import (
+    GuardConfig,
+    GuardState,
+    detect_override,
+    filter_command,
+    manual_command,
+    record,
+)
+from .logic.presence import PresenceMemory, presence_command
 from .logic.snapshot import (
     ComfortSettings,
     ForecastPoint,
@@ -77,6 +88,11 @@ if TYPE_CHECKING:
     from .coordinator import HvacCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+PRESENCE_ZONING = "presence_zoning"
+ROOM_BALANCING = "room_balancing"
+BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING)
+AUTOPILOT_MIN_GAP = timedelta(seconds=55)
 
 HOME_STATES = {"home", "on"}
 UNAVAILABLE = {"unknown", "unavailable", ""}
@@ -129,6 +145,14 @@ class ComfortManager:
         self.snapshots: dict[str, HouseSnapshot] = {}
         self._dismissed: dict[tuple[str, str], datetime] = {}
         self.guest_modes: dict[str, bool] = {}
+        self.autopilot: dict[str, dict[str, bool]] = {}
+        self.last_action: dict[str, dict[str, Any]] = {}
+        self.guard_config = GuardConfig()
+        self._guards: dict[str, GuardState] = {}
+        self._balance: dict[str, BalanceMemory] = {}
+        self._presence_memory: dict[str, PresenceMemory] = {}
+        self._previous: dict[str, Any] = {}
+        self._last_run: dict[str, datetime] = {}
         self._forecast: tuple[ForecastPoint, ...] = ()
         self._forecast_at: datetime | None = None
         self._listeners: list[Callable[[], None]] = []
@@ -146,7 +170,10 @@ class ComfortManager:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, watched, self._on_input_change)
             )
-        self._unsubs.append(self.coordinator.async_add_listener(self._schedule))
+        self._unsubs.append(self.coordinator.async_add_listener(self._on_unit_update))
+        self._unsubs.append(self.coordinator.async_add_command_listener(self._on_command))
+        for unit_id in self.coordinator.units:
+            self._previous[unit_id] = self.coordinator.state(unit_id)
         self._unsubs.append(
             async_track_time_interval(
                 self.hass, self._on_interval, timedelta(seconds=ADVICE_INTERVAL_SECONDS)
@@ -180,6 +207,34 @@ class ComfortManager:
 
     @callback
     def _on_input_change(self, _event: Event) -> None:
+        self._schedule()
+
+    def _guard(self, unit_id: str) -> GuardState:
+        return self._guards.setdefault(unit_id, GuardState())
+
+    def autopilot_on(self, unit_id: str) -> bool:
+        """Return True when any autopilot behaviour is enabled for the unit."""
+        return any(self.autopilot.get(unit_id, {}).values())
+
+    @callback
+    def _on_command(self, unit_id: str, command: Any, source: str) -> None:
+        """Hold what a person changed through Home Assistant."""
+        if source != "autopilot" and self.autopilot_on(unit_id):
+            manual_command(self.guard_config, self._guard(unit_id), command, dt_util.utcnow())
+
+    @callback
+    def _on_unit_update(self) -> None:
+        """Spot changes made in the app or on the wall controller."""
+        now = dt_util.utcnow()
+        for unit_id in self.coordinator.units:
+            after = self.coordinator.state(unit_id)
+            before = self._previous.get(unit_id)
+            self._previous[unit_id] = after
+            if before is None or after is None or not self.autopilot_on(unit_id):
+                continue
+            paused = detect_override(self.guard_config, self._guard(unit_id), before, after, now)
+            if paused:
+                _LOGGER.debug("Autopilot paused for %s after a manual change: %s", unit_id, paused)
         self._schedule()
 
     @callback
@@ -364,9 +419,88 @@ class ComfortManager:
             self.advice[unit_id] = [
                 rec for rec in evaluate(snapshot) if (unit_id, rec.id) not in self._dismissed
             ]
+        for unit_id in self.coordinator.units:
+            await self._async_autopilot(unit_id)
         for listener in list(self._listeners):
             listener()
         async_dispatcher_send(self.hass, signal_update(self.entry.entry_id))
+
+    async def _async_autopilot(self, unit_id: str) -> None:
+        """Let enabled behaviours act, within the guard rails."""
+        enabled = self.autopilot.get(unit_id, {})
+        snapshot = self.snapshots.get(unit_id)
+        if not any(enabled.values()) or snapshot is None or not snapshot.unit.online:
+            return
+        now = dt_util.utcnow()
+        last = self._last_run.get(unit_id)
+        if last is not None and now - last < AUTOPILOT_MIN_GAP:
+            return
+        minutes = (now - last).total_seconds() / 60 if last else 1.0
+        self._last_run[unit_id] = now
+        guard = self._guard(unit_id)
+        paused = {n for n in guard.zone_paused_until if guard.zone_paused(n, now)}
+        command = Command()
+        if enabled.get(ROOM_BALANCING):
+            command = balance_command(
+                snapshot, self._balance.setdefault(unit_id, BalanceMemory()), minutes, paused
+            )
+        if enabled.get(PRESENCE_ZONING):
+            command = command.merge(
+                presence_command(
+                    snapshot, self._presence_memory.setdefault(unit_id, PresenceMemory())
+                )
+            )
+        allowed = filter_command(self.guard_config, guard, snapshot, command, now)
+        if allowed is None:
+            return
+        try:
+            await self.coordinator.async_send(unit_id, allowed, source="autopilot")
+        except HomeAssistantError as err:
+            _LOGGER.warning("Autopilot could not send %s: %s", allowed, err)
+            return
+        record(guard, allowed, now)
+        self.last_action[unit_id] = {"time": now.isoformat(), "action": command_as_dict(allowed)}
+
+    async def async_set_autopilot(self, unit_id: str, behaviour: str, enabled: bool) -> None:
+        """Turn an autopilot behaviour on or off."""
+        self.autopilot.setdefault(unit_id, {})[behaviour] = enabled
+        if not enabled:
+            self._balance.pop(unit_id, None)
+        await self._async_evaluate()
+
+    async def async_pause(self, unit_id: str | None, minutes: int) -> None:
+        """Hold autopilot for every zone and the unit."""
+        until = dt_util.utcnow() + timedelta(minutes=minutes)
+        for uid in [unit_id] if unit_id else list(self.coordinator.units):
+            guard = self._guard(uid)
+            guard.unit_paused_until = until
+            slots = self.coordinator.units[uid].capabilities.zone_slots
+            for zone in range(1, slots + 1):
+                guard.zone_paused_until[zone] = until
+        await self._async_evaluate()
+
+    async def async_resume(self, unit_id: str | None) -> None:
+        """Clear manual holds so autopilot acts again."""
+        for uid in [unit_id] if unit_id else list(self.coordinator.units):
+            self._guard(uid).resume()
+        await self._async_evaluate()
+
+    def autopilot_status(self, unit_id: str) -> dict[str, Any]:
+        """Return autopilot state for the card and attributes."""
+        now = dt_util.utcnow()
+        guard = self._guard(unit_id)
+        return {
+            "behaviours": {b: self.autopilot.get(unit_id, {}).get(b, False) for b in BEHAVIOURS},
+            "paused_until": guard.unit_paused_until.isoformat()
+            if guard.unit_paused(now) and guard.unit_paused_until
+            else None,
+            "zones_paused": {
+                str(n): until.isoformat()
+                for n, until in guard.zone_paused_until.items()
+                if guard.zone_paused(n, now)
+            },
+            "last_action": self.last_action.get(unit_id),
+        }
 
     async def async_set_guest_mode(self, unit_id: str, enabled: bool) -> None:
         """Turn guest mode on or off for a unit."""
@@ -453,6 +587,7 @@ class ComfortManager:
                     "occupied": zone.occupied,
                     "window_open": zone.window_open,
                     "guest": zone.guest,
+                    "paused": self._guard(unit_id).zone_paused(zone.zone, dt_util.utcnow()),
                     "band": {"low": zband.low, "high": zband.high},
                     "demand": zone_demand(snapshot, zone),
                     "entities": {
@@ -502,7 +637,7 @@ class ComfortManager:
                 for p in snapshot.forecast[:24]
             ],
             "advice": [rec.as_dict() for rec in self.advice.get(unit_id, [])],
-            "autopilot": {},
+            "autopilot": self.autopilot_status(unit_id),
             "plan": [],
             "updated": snapshot.now.isoformat(),
         }

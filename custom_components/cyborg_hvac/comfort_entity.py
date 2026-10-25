@@ -92,6 +92,51 @@ class GuestModeSwitch(_ComfortMixin, CyborgEntity, SwitchEntity, RestoreEntity):
         await self.comfort.async_set_guest_mode(self._unit_id, False)
 
 
+class AutopilotSwitch(_ComfortMixin, CyborgEntity, SwitchEntity, RestoreEntity):
+    """Lets one autopilot behaviour act on the unit. Off until you turn it on."""
+
+    def __init__(self, coordinator, unit_id: str, behaviour: str) -> None:
+        """Bind to a behaviour."""
+        super().__init__(coordinator, unit_id, behaviour)
+        self._behaviour = behaviour
+        self._attr_translation_key = behaviour
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last state."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state == "on":
+            await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, True)
+
+    @property
+    def available(self) -> bool:
+        """Settable even while the unit is offline."""
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        """Return True while the behaviour is enabled."""
+        return self.comfort.autopilot.get(self._unit_id, {}).get(self._behaviour, False)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show holds and the last action."""
+        status = self.comfort.autopilot_status(self._unit_id)
+        return {
+            "paused_until": status["paused_until"],
+            "zones_paused": status["zones_paused"],
+            "last_action": status["last_action"],
+        }
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable the behaviour."""
+        await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable the behaviour."""
+        await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, False)
+
+
 class ZoneOccupiedSensor(_ComfortMixin, CyborgZoneEntity, BinarySensorEntity):
     """Whether anyone is in the zone, merged from its presence sensors."""
 

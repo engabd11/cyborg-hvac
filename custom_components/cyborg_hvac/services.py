@@ -17,6 +17,8 @@ ATTR_MINUTES = "minutes"
 
 SERVICE_APPLY = "apply_recommendation"
 SERVICE_DISMISS = "dismiss_recommendation"
+SERVICE_PAUSE = "pause_autopilot"
+SERVICE_RESUME = "resume_autopilot"
 
 _BASE = {
     vol.Required(ATTR_RECOMMENDATION): cv.string,
@@ -73,3 +75,28 @@ def async_register(hass: HomeAssistant) -> None:
             {**_BASE, vol.Optional(ATTR_MINUTES): vol.All(vol.Coerce(int), vol.Range(1, 10080))}
         ),
     )
+
+    unit_schema = {vol.Optional(ATTR_UNIT_ID): cv.string, vol.Optional(ATTR_ENTRY_ID): cv.string}
+
+    async def pause(call: ServiceCall) -> None:
+        for manager in _managers(hass, call.data.get(ATTR_ENTRY_ID)):
+            await manager.async_pause(call.data.get(ATTR_UNIT_ID), call.data[ATTR_MINUTES])
+
+    async def resume(call: ServiceCall) -> None:
+        for manager in _managers(hass, call.data.get(ATTR_ENTRY_ID)):
+            await manager.async_resume(call.data.get(ATTR_UNIT_ID))
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PAUSE,
+        pause,
+        schema=vol.Schema(
+            {
+                **unit_schema,
+                vol.Optional(ATTR_MINUTES, default=120): vol.All(
+                    vol.Coerce(int), vol.Range(1, 1440)
+                ),
+            }
+        ),
+    )
+    hass.services.async_register(DOMAIN, SERVICE_RESUME, resume, schema=vol.Schema(unit_schema))

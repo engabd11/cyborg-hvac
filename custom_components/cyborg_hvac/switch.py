@@ -10,7 +10,8 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .comfort_entity import GuestModeSwitch
+from .comfort_entity import AutopilotSwitch, GuestModeSwitch
+from .comfort_manager import BEHAVIOURS
 from .coordinator import CyborgRuntimeData
 from .core.model import Command, Feature, FeatureKind, ZoneCommand
 from .entity import CyborgEntity, CyborgZoneEntity, zone_subentries
@@ -32,6 +33,11 @@ async def async_setup_entry(
         if spec.kind is FeatureKind.SWITCH
     )
     async_add_entities(GuestModeSwitch(coordinator, unit_id) for unit_id in coordinator.units)
+    async_add_entities(
+        AutopilotSwitch(coordinator, unit_id, behaviour)
+        for unit_id in coordinator.units
+        for behaviour in BEHAVIOURS
+    )
     for subentry in zone_subentries(coordinator):
         async_add_entities(
             [ZoneSwitch(coordinator, subentry)], config_subentry_id=subentry.subentry_id

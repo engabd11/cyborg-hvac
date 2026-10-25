@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
@@ -92,6 +93,7 @@ class HvacCoordinator(DataUpdateCoordinator[dict[str, UnitState]]):
         self._pending: dict[str, _Pending] = {}
         self._overlays: dict[str, _Overlay] = {}
         self._confirm_cancel: CALLBACK_TYPE | None = None
+        self._command_listeners: list[Callable[[str, Command, str], None]] = []
 
     async def _async_update_data(self) -> dict[str, UnitState]:
         try:
@@ -137,8 +139,26 @@ class HvacCoordinator(DataUpdateCoordinator[dict[str, UnitState]]):
         """Return the latest state of a unit."""
         return self.data.get(unit_id) if self.data else None
 
-    async def async_send(self, unit_id: str, command: Command) -> None:
-        """Validate, show straight away, then send within a short batch window."""
+    @callback
+    def async_add_command_listener(
+        self, listener: Callable[[str, Command, str], None]
+    ) -> CALLBACK_TYPE:
+        """Call ``listener(unit_id, command, source)`` for every accepted command."""
+        self._command_listeners.append(listener)
+
+        @callback
+        def remove() -> None:
+            if listener in self._command_listeners:
+                self._command_listeners.remove(listener)
+
+        return remove
+
+    async def async_send(self, unit_id: str, command: Command, *, source: str = "user") -> None:
+        """Validate, show straight away, then send within a short batch window.
+
+        ``source`` is "autopilot" for smart comfort; anything else counts as a
+        person, which pauses autopilot for what they touched.
+        """
         if command.is_empty:
             return
         info = self.units[unit_id]
@@ -155,6 +175,8 @@ class HvacCoordinator(DataUpdateCoordinator[dict[str, UnitState]]):
                 translation_domain=DOMAIN, translation_key=err.reason
             ) from err
 
+        for listener in list(self._command_listeners):
+            listener(unit_id, command, source)
         self.async_set_updated_data({**self.data, unit_id: command.apply_to(state)})
 
         if pending is None:

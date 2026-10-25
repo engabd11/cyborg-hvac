@@ -13,6 +13,33 @@ apply_recommendation:
         config_entry:
           integration: cyborg_hvac
 
+pause_autopilot:
+  fields:
+    minutes:
+      default: 120
+      selector:
+        number:
+          min: 1
+          max: 1440
+          unit_of_measurement: min
+    unit_id:
+      selector:
+        text:
+    entry_id:
+      selector:
+        config_entry:
+          integration: cyborg_hvac
+
+resume_autopilot:
+  fields:
+    unit_id:
+      selector:
+        text:
+    entry_id:
+      selector:
+        config_entry:
+          integration: cyborg_hvac
+
 dismiss_recommendation:
   fields:
     recommendation:
