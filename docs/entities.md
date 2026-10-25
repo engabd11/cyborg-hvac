@@ -19,6 +19,10 @@ Each unit is a device, and each zone is its own device linked to the unit, so zo
 | Connected | Whether the unit is reachable through the cloud. |
 | Fault | On when the unit reports a fault; the codes are listed as attributes. |
 | Filter | Filter cleaning reminder. Starts disabled until its meaning is confirmed on ducted units. |
+| Advice | How many smart comfort recommendations are open; the top one and the full list are attributes. |
+| Guest mode | Puts guest zones first. |
+| Autopilot: presence zoning, room balancing, weather pre-conditioning, solar shifting, bedtime | Each autopilot behaviour, off until you turn it on. Attributes show manual holds and the last change with its reason. |
+| Sleep temperature | The temperature bedtime holds sleep zones at. |
 
 Switching on a feature the unit would refuse in its current mode is stopped with a clear message instead of failing silently in the cloud.
 
@@ -29,3 +33,6 @@ Switching on a feature the unit would refuse in its current mode is stopped with
 | Damper (cover) | Open, close, or set the opening from 0 to 100%. Closing switches the zone off and keeps its opening, so opening it again restores the same airflow. Setting 0% switches the zone off. Openings round to the controller's step (5% on the HACZ01). |
 | Power (switch) | Switches the zone on or off without changing its opening. |
 | Temperature | The zone's own temperature, for brands that report one per zone (the demo unit does). |
+| Occupied | Whether anyone is in the room, from its presence sensors with the presence hold applied. Only on zones with presence sensors. |
+
+See the [README](https://github.com/engabd11/cyborg-hvac#readme) for every option and behaviour.
