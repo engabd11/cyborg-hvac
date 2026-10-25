@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time
 from enum import StrEnum
 
-from ..core.model import Capabilities, UnitState
+from ..core.model import Capabilities, SensorKind, UnitState
 
 
 class Period(StrEnum):
@@ -72,6 +72,9 @@ class ZoneInputs:
     sleep: bool = False
     # True when the open window or door is a door (for wording only).
     door_open: bool = False
+    # Minutes in the last 12 hours that the room's cold surfaces were damp enough
+    # for mould (tracked by the Home Assistant layer, see logic.health).
+    damp_minutes: float = 0.0
 
     @property
     def has_sensor(self) -> bool:
@@ -129,6 +132,11 @@ class HouseSnapshot:
     def sensed_zones(self) -> tuple[ZoneInputs, ...]:
         """Return zones with a room temperature."""
         return tuple(z for z in self.zones if z.has_sensor)
+
+    @property
+    def unit_humidity(self) -> float | None:
+        """Return the humidity the unit measures in its return air, if it reports one."""
+        return self.unit.sensors.get(SensorKind.HUMIDITY)
 
     @property
     def open_zones(self) -> tuple[ZoneInputs, ...]:

@@ -8,7 +8,8 @@ from typing import Any
 
 from ..core.model import Command, HvacMode
 from .comfort import Band, house_band, indoor_temperature
-from .snapshot import ForecastPoint, HouseSnapshot, Period
+from .outlook import heatwave_threshold, outdoor_series
+from .snapshot import HouseSnapshot, Period
 from .thermal import ThermalModel
 
 SAFETY_FACTOR = 1.25
@@ -16,6 +17,7 @@ HOT_SPIKE_MARGIN = 8.0
 SOLAR_START_W = 1500.0
 SOLAR_STOP_W = 600.0
 BANK_DEGREES = 1.0
+HEATWAVE_LEAD = 2  # a heatwave pre-cool starts this many times earlier
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,36 +72,6 @@ def _next_at(now: datetime, at: time) -> datetime:
     return candidate if candidate > now else candidate + timedelta(days=1)
 
 
-def _outdoor_series(s: HouseSnapshot, until: datetime) -> list[float]:
-    """Return one outdoor temperature per minute from now until ``until``."""
-    points = [p for p in s.forecast if p.temperature is not None]
-    minutes = max(0, int((until - s.now).total_seconds() // 60))
-    fallback = s.outdoor_temp
-    series: list[float] = []
-    for minute in range(minutes):
-        at = s.now + timedelta(minutes=minute)
-        value = _at(points, at, fallback)
-        if value is None:
-            return []
-        series.append(value)
-    return series
-
-
-def _at(points: list[ForecastPoint], at: datetime, fallback: float | None) -> float | None:
-    before = [p for p in points if p.time <= at]
-    after = [p for p in points if p.time > at]
-    if before and after:
-        a, b = before[-1], after[0]
-        span = (b.time - a.time).total_seconds() or 1
-        frac = (at - a.time).total_seconds() / span
-        return a.temperature + (b.temperature - a.temperature) * frac  # type: ignore[operator]
-    if before:
-        return before[-1].temperature
-    if after:
-        return after[0].temperature if fallback is None else fallback
-    return fallback
-
-
 def periods(s: HouseSnapshot, hours: int = 24) -> list[dict[str, Any]]:
     """Return day and night stretches with their bands for the next ``hours``."""
     settings = s.settings
@@ -151,7 +123,7 @@ def precondition_blocks(s: HouseSnapshot, model: ThermalModel) -> list[PlanBlock
         (_next_at(s.now, settings.night_start), Period.NIGHT),
         (_next_at(s.now, settings.night_end), Period.DAY),
     ):
-        outdoors = _outdoor_series(s, at)
+        outdoors = outdoor_series(s, at)
         if not outdoors:
             continue
         band = house_band(s, period)
@@ -188,6 +160,10 @@ def precondition_blocks(s: HouseSnapshot, model: ThermalModel) -> list[PlanBlock
                 share,
             )
             lead = timedelta(minutes=(need or 120) * SAFETY_FACTOR)
+            heatwave = hottest.temperature >= heatwave_threshold(s)  # type: ignore[operator]
+            if heatwave:
+                # Start in the cool of the morning: the unit works far better then.
+                lead *= HEATWAVE_LEAD
             start = max(s.now, hottest.time - timedelta(hours=3) - lead)
             if start < hottest.time:
                 blocks.append(
@@ -198,8 +174,12 @@ def precondition_blocks(s: HouseSnapshot, model: ThermalModel) -> list[PlanBlock
                         HvacMode.COOL,
                         target,
                         f"{hottest.temperature:g} °C forecast at "
-                        f"{hottest.time.strftime('%H:%M')}. Cooling ahead of the heat costs "
-                        "less than fighting it.",
+                        f"{hottest.time.strftime('%H:%M')}. "
+                        + (
+                            "Heatwave: banking cool while it is mild outside."
+                            if heatwave
+                            else "Cooling ahead of the heat costs less than fighting it."
+                        ),
                     )
                 )
     return [b for b in blocks if b.end > s.now]
@@ -279,7 +259,7 @@ def solar_command(s: HouseSnapshot, memory: SolarMemory) -> tuple[Command, PlanB
         return (restore or Command()), None
     if memory.active:
         mode = unit.mode or HvacMode.COOL
-        return Command(), _solar_block(s, mode, unit.target_temp or band.middle)
+        return Command(), solar_block(s, mode, unit.target_temp or band.middle)
     if export < SOLAR_START_W or indoor is None or outdoor is None or s.anyone_home is False:
         return Command(), None
     if outdoor > band.high and HvacMode.COOL in s.caps.hvac_modes:
@@ -293,10 +273,11 @@ def solar_command(s: HouseSnapshot, memory: SolarMemory) -> tuple[Command, PlanB
     target = s.caps.round_temp(target)
     memory.active = True
     memory.restore = Command(target_temp=unit.target_temp) if unit.power else Command(power=False)
-    return Command(power=True, mode=mode, target_temp=target), _solar_block(s, mode, target)
+    return Command(power=True, mode=mode, target_temp=target), solar_block(s, mode, target)
 
 
-def _solar_block(s: HouseSnapshot, mode: HvacMode, target: float) -> PlanBlock:
+def solar_block(s: HouseSnapshot, mode: HvacMode, target: float) -> PlanBlock:
+    """Return the plan block that shows solar banking on the timeline."""
     return PlanBlock(
         "solar",
         s.now,

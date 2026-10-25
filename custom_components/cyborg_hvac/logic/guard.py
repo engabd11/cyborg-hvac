@@ -1,8 +1,8 @@
 """Guard rails for everything autopilot sends.
 
 Autopilot proposes commands; the guard trims them so the unit is never
-short-cycled, the fan never starves, the cloud is not flooded, and a person's
-manual change is respected for a while.
+short-cycled or flipped between modes, the fan never starves, the cloud is not
+flooded, and a person's manual change is respected for a while.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ class GuardConfig:
     budget_window: timedelta = timedelta(minutes=10)
     setpoint_interval: timedelta = timedelta(minutes=5)
     compressor_min: timedelta = timedelta(minutes=8)
+    # Least time between two mode changes, whatever autopilot thinks.
+    mode_interval: timedelta = timedelta(minutes=30)
     zone_interval: timedelta = timedelta(minutes=2)
     override_hold: timedelta = timedelta(hours=2)
     # Commands sent within this window explain changes that arrive by push.
@@ -36,14 +38,20 @@ class GuardState:
     writes: deque[datetime] = field(default_factory=deque)
     last_setpoint: datetime | None = None
     last_power: datetime | None = None
+    last_mode: datetime | None = None
     last_zone: dict[int, datetime] = field(default_factory=dict)
     unit_paused_until: datetime | None = None
     zone_paused_until: dict[int, datetime] = field(default_factory=dict)
+    fan_paused_until: datetime | None = None
     recent: deque[tuple[datetime, Command]] = field(default_factory=deque)
 
     def unit_paused(self, now: datetime) -> bool:
         """Return True while a manual change holds unit-level autopilot."""
         return self.unit_paused_until is not None and now < self.unit_paused_until
+
+    def fan_paused(self, now: datetime) -> bool:
+        """Return True while a person's fan choice is being respected."""
+        return self.fan_paused_until is not None and now < self.fan_paused_until
 
     def zone_paused(self, zone: int, now: datetime) -> bool:
         """Return True while a manual change holds a zone."""
@@ -53,6 +61,7 @@ class GuardState:
     def resume(self) -> None:
         """Clear every hold."""
         self.unit_paused_until = None
+        self.fan_paused_until = None
         self.zone_paused_until.clear()
 
 
@@ -82,15 +91,27 @@ def filter_command(
         return None
     unit = s.unit
     power, mode, target = command.power, command.mode, command.target_temp
+    fan = command.fan_speed
 
     if state.unit_paused(now):
-        power = mode = target = None
+        power = mode = target = fan = None
+    if state.fan_paused(now) or fan == unit.fan_speed:
+        fan = None
     if power is not None and power == unit.power:
         power = None
     if power is not None and state.last_power and now - state.last_power < cfg.compressor_min:
         power = None
     if mode is not None and mode == unit.mode:
         mode = None
+    starting = power is True and not unit.power
+    if (
+        mode is not None
+        and not starting
+        and state.last_mode
+        and now - state.last_mode < cfg.mode_interval
+    ):
+        # Too soon to flip modes: the setpoint and fan were meant for the new one.
+        mode = target = fan = None
     too_soon = state.last_setpoint and now - state.last_setpoint < cfg.setpoint_interval
     if (
         target is not None
@@ -128,7 +149,7 @@ def filter_command(
         power=power,
         mode=mode,
         target_temp=target,
-        fan_speed=command.fan_speed,
+        fan_speed=fan,
         features=dict(command.features),
         zones=zones,
     )
@@ -140,6 +161,8 @@ def record(state: GuardState, command: Command, now: datetime) -> None:
     state.writes.append(now)
     if command.power is not None:
         state.last_power = now
+    if command.mode is not None:
+        state.last_mode = now
     if command.target_temp is not None:
         state.last_setpoint = now
     for number in command.zones:
@@ -174,6 +197,20 @@ def detect_override(
     if unit_changed:
         state.unit_paused_until = now + cfg.override_hold
         paused.append("unit")
+    elif (
+        after.power
+        and before.power
+        and before.fan_speed != after.fan_speed
+        and not _explained(
+            cfg,
+            state,
+            now,
+            # A unit may pick its own fan speed when its mode or power changes.
+            lambda c: c.fan_speed == after.fan_speed or c.mode is not None or c.power is not None,
+        )
+    ):
+        state.fan_paused_until = now + cfg.override_hold
+        paused.append("fan")
     for number, zone in after.zones.items():
         old = before.zones.get(number)
         if old is None or (old.on == zone.on and old.opening == zone.opening):
@@ -197,5 +234,7 @@ def manual_command(cfg: GuardConfig, state: GuardState, command: Command, now: d
     note_command(state, command, now)
     if command.power is not None or command.mode is not None or command.target_temp is not None:
         state.unit_paused_until = now + cfg.override_hold
+    if command.fan_speed is not None:
+        state.fan_paused_until = now + cfg.override_hold
     for number in command.zones:
         state.zone_paused_until[number] = now + cfg.override_hold

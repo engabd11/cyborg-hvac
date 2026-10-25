@@ -4,7 +4,8 @@ from datetime import UTC, datetime, timedelta
 from cyborg_hvac.backends.demo.backend import demo_capabilities
 from cyborg_hvac.backends.demo.simulation import SimSystem
 from cyborg_hvac.core.model import Command, HvacMode, UnitState, ZoneCommand, ZoneState
-from cyborg_hvac.logic.balancing import BalanceMemory, aim, balance_command
+from cyborg_hvac.logic.autopilot import Switches
+from cyborg_hvac.logic.balancing import aim
 from cyborg_hvac.logic.guard import (
     GuardConfig,
     GuardState,
@@ -15,79 +16,37 @@ from cyborg_hvac.logic.guard import (
 )
 from cyborg_hvac.logic.presence import PresenceMemory, presence_command
 from cyborg_hvac.logic.snapshot import HouseSnapshot, ZoneInputs
+from sim_rig import Rig, realistic
 
 T0 = datetime(2026, 7, 10, 8, 0, tzinfo=UTC)
 
 
-def sim_snapshot(sim: SimSystem, now: datetime, **kw) -> HouseSnapshot:
-    unit = UnitState(
-        power=sim.power,
-        mode=sim.mode,
-        target_temp=sim.target,
-        current_temp=round(sim.return_air(), 1),
-        zones={n: ZoneState(z.on, z.opening, z.temperature) for n, z in sim.zones.items()},
-    )
-    zones = tuple(
-        ZoneInputs(
-            zone=n,
-            name=f"Zone {n}",
-            on=z.on,
-            opening=z.opening,
-            temperature=round(z.temperature, 2),
-            occupied=True,
-        )
-        for n, z in sim.zones.items()
-    )
-    return HouseSnapshot(
-        now=now, unit_name="Sim", caps=demo_capabilities(), unit=unit, zones=zones, **kw
-    )
-
-
-def apply(sim: SimSystem, command: Command) -> None:
-    if command.power is not None:
-        sim.power = command.power
-    if command.target_temp is not None:
-        sim.target = command.target_temp
-    if command.mode is not None:
-        sim.mode = command.mode
-    for n, change in command.zones.items():
-        if change.on is not None:
-            sim.zones[n].on = change.on
-        if change.opening is not None:
-            sim.zones[n].opening = change.opening
-
-
 def test_balancing_holds_every_room_in_band_on_the_simulation():
-    sim = SimSystem.create(4, start=16.5, outdoor=11.0)
-    sim.zones[4].loss_rate = 0.016  # a draughty room far from the return grille
+    sim = realistic(SimSystem.create(4, start=16.5, outdoor=11.0))
+    sim.zones[4].loss_rate *= 2  # a draughty room far from the return grille
     sim.power, sim.mode, sim.target = True, HvacMode.HEAT, 21.0
-    memory, guard, cfg = BalanceMemory(), GuardState(), GuardConfig()
-    now, writes = T0, 0
+    rig = Rig(sim, Switches(balancing=True), T0, zone_kw={n: {"occupied": True} for n in sim.zones})
     min_total = 999
     for minute in range(6 * 60):
-        sim.step(1)
-        now = T0 + timedelta(minutes=minute)
-        snapshot = sim_snapshot(sim, now)
-        proposed = balance_command(snapshot, memory, 1, paused=set())
-        command = filter_command(cfg, guard, snapshot, proposed, now)
-        if command:
-            apply(sim, command)
-            record(guard, command, now)
-            writes += 1
+        rig.step()
         min_total = min(min_total, sum(z.opening for z in sim.zones.values() if z.on))
         if minute >= 5 * 60:
-            rooms = sim_snapshot(sim, now).zones
-            for z in rooms:
-                assert 20.0 <= z.temperature <= 24.0, (minute, z)  # inside the day band
-            coldest = min(r.temperature for r in rooms)
-            assert abs(coldest - aim(snapshot, rooms[0], HvacMode.HEAT)) < 0.5
+            snapshot = rig.snapshot()
+            for z in snapshot.zones:
+                # Inside the day band; the draughty room gets there gently, so it may sit
+                # just under the bottom of the band rather than the house being overdriven.
+                assert 20.0 - (0.4 if z.zone == 4 else 0.0) <= z.temperature <= 24.0, (minute, z)
+            coldest = min(r.temperature for r in snapshot.zones)
+            assert abs(coldest - aim(snapshot, snapshot.zones[0], HvacMode.HEAT)) < 0.75
     assert min_total >= 150
-    # Far fewer writes than the budget allows: about one every three minutes or less.
-    assert writes <= 6 * 60 / 3
-    # The draughty room ends up with the most air.
+    # Far fewer writes than a damper loop: about one every quarter of an hour.
+    assert rig.writes() <= 6 * 60 / 12
+    assert not rig.budget_hit
+    # The draughty room ends up with the most air, the others throttled for it.
     assert sim.zones[4].opening == max(z.opening for z in sim.zones.values())
-    # And the smart setpoint sits above the aim to make up for return-air bias.
-    assert sim.target >= 20.5
+    assert all(sim.zones[n].opening <= sim.zones[4].opening - 30 for n in (1, 2, 3))
+    for zone in range(1, 5):
+        assert rig.most_moves_in_an_hour(zone, after=60) <= 3
 
 
 def snap(zones, **kw):

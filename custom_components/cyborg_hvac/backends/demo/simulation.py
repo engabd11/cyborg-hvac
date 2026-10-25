@@ -28,6 +28,8 @@ class SimZone:
     loss_rate: float = 0.01
     on: bool = True
     opening: int = 100
+    # Heat from sun, people or appliances, in °C per minute.
+    gain: float = 0.0
 
 
 @dataclass(slots=True)
@@ -42,6 +44,8 @@ class SimSystem:
     fan: str = "auto"
     features: dict[Feature, object] = field(default_factory=dict)
     output: float = 0.0
+    # Heat delivered across all zones at full output, in °C per minute.
+    capacity: float = FULL_OUTPUT
 
     @classmethod
     def create(cls, zone_count: int, start: float = 18.0, outdoor: float = 12.0) -> SimSystem:
@@ -69,6 +73,7 @@ class SimSystem:
         """Advance the simulation."""
         for zone in self.zones.values():
             zone.temperature += (self.outdoor - zone.temperature) * zone.loss_rate * minutes
+            zone.temperature += zone.gain * minutes
 
         self.output = 0.0
         if not self.power or self.mode in (HvacMode.FAN_ONLY, HvacMode.DRY):
@@ -91,7 +96,7 @@ class SimSystem:
             demand = 1.0 if error > 0 else 0.0
             limit = POWERFUL_BOOST
         self.output = demand * limit * FAN_FACTOR.get(self.fan, 1.0)
-        delivered = FULL_OUTPUT * self.output * direction * minutes
+        delivered = self.capacity * self.output * direction * minutes
         zone_count = len(self.zones)
         for n, weight in weights.items():
             # Spread per zone so a single open zone heats faster than five.

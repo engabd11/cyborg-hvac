@@ -29,6 +29,7 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
     coordinator = entry.runtime_data.coordinator
+    comfort = entry.runtime_data.comfort
     units = []
     for index, (unit_id, info) in enumerate(coordinator.units.items(), start=1):
         state = coordinator.state(unit_id)
@@ -42,6 +43,8 @@ async def async_get_config_entry_diagnostics(
                 if state
                 else None,
                 "raw_status": async_redact_data(dict(state.raw), TO_REDACT) if state else None,
+                # What autopilot is doing and why, to explain its choices in a bug report.
+                "autopilot": comfort.autopilot_status(unit_id) if comfort else None,
             }
         )
     return {

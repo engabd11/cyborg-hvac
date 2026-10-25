@@ -26,7 +26,10 @@ from .comfort import (
     zone_band,
     zone_error,
 )
+from .health import assess
+from .outlook import outdoor_series, outlook
 from .snapshot import HouseSnapshot, Period, Priority, ZoneInputs
+from .thermal import ThermalModel
 
 HIGH_HEAT_SETPOINT = 26.0
 LOW_COOL_SETPOINT = 21.0
@@ -34,6 +37,7 @@ SPREAD_DEGREES = 2.0
 HOT_DAY_MARGIN = 8.0
 COLD_NIGHT_MARGIN = 10.0
 SOLAR_SURPLUS_W = 1500.0
+COAST_MINUTES = 120  # outside bringing rooms back within this long counts as coasting
 
 
 class Severity(StrEnum):
@@ -131,6 +135,15 @@ def rule_unit_health(s: HouseSnapshot) -> Iterable[Recommendation]:
             "The unit reports a fault",
             "Fault codes: " + ", ".join(s.unit.faults) + ". Check the wall controller.",
         )
+    if s.unit.filter_alert:
+        yield Recommendation(
+            "unit_filter",
+            "unit",
+            Severity.SUGGEST,
+            "Clean the filter",
+            "A clogged filter cuts airflow, so rooms take longer to reach comfort, and it lets "
+            "dust and mould spores back into the house.",
+        )
 
 
 def _join(names: list[str]) -> str:
@@ -163,8 +176,30 @@ def describe_rooms(s: HouseSnapshot, warm: bool) -> str:
 # Mode -----------------------------------------------------------------------------
 
 
-def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
+def _coast_minutes(s: HouseSnapshot, model: ThermalModel, warm: bool) -> float | None:
+    """Return minutes until outside brings the rooms out of range back, or None if it will not."""
+    offenders = [
+        z
+        for z in deciding_zones(s)
+        if (zone_error(s, z) < -NEED_MARGIN if warm else zone_error(s, z) > NEED_MARGIN)
+    ]
+    outdoors = outdoor_series(s, s.now + timedelta(minutes=COAST_MINUTES))
+    if not offenders or not outdoors:
+        return None
+    longest = 0
+    for zone in offenders:
+        band = zone_band(s, zone)
+        edge = band.high if warm else band.low
+        minutes = model.minutes_to_drift(zone.zone, zone.temperature, edge, outdoors)  # type: ignore[arg-type]
+        if minutes is None:
+            return None
+        longest = max(longest, minutes)
+    return longest
+
+
+def rule_mode(s: HouseSnapshot, model: ThermalModel | None = None) -> Iterable[Recommendation]:
     """Pick the right mode for how the rooms and outdoor air are right now."""
+    model = model or ThermalModel()
     need_heat, need_cool = needs(s)
     band = house_band(s)
     indoor = indoor_temperature(s)
@@ -182,6 +217,10 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
             Command(power=False),
         )
         return
+    if mode is HvacMode.HEAT and need_cool and need_heat:
+        yield from _close_ahead(s, warm=True)
+    elif mode is HvacMode.COOL and need_cool and need_heat:
+        yield from _close_ahead(s, warm=False)
     if mode is HvacMode.COOL and need_heat and not need_cool:
         yield Recommendation(
             "mode_cooling_cold",
@@ -227,7 +266,17 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
                 Command(power=True, mode=HvacMode.HEAT, target_temp=target),
             )
     elif not running and need_cool and not need_heat:
-        if (
+        coast = _coast_minutes(s, model, warm=True)
+        if coast is not None and outdoor is not None and outdoor < band.low - 2:
+            yield Recommendation(
+                "mode_coast",
+                "mode",
+                Severity.INFO,
+                "Rooms will cool on their own",
+                f"{describe_rooms(s, warm=True)} It is {fmt(outdoor)} outside, so they are back "
+                f"in range in about {max(5, round(coast / 5) * 5)} minutes without cooling.",
+            )
+        elif (
             outdoor is not None
             and indoor is not None
             and outdoor <= indoor - 2
@@ -274,8 +323,13 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
 
     occupied = [z for z in s.sensed_zones if z.occupied is not False]
     temps = [z.temperature for z in occupied if z.temperature is not None]
+    humid = [z.humidity for z in occupied if z.humidity is not None]
+    if s.unit_humidity is not None:
+        humid.append(s.unit_humidity)
     if (
         len(temps) >= 2
+        # Fan-only in humid air puts moisture from the coil back into the rooms.
+        and not (humid and max(humid) > s.settings.humidity_max)
         and max(temps) - min(temps) > SPREAD_DEGREES
         and comfortable
         and mode is not HvacMode.FAN_ONLY
@@ -292,7 +346,6 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
             Command(power=True, mode=HvacMode.FAN_ONLY),
         )
 
-    humid = [z.humidity for z in occupied if z.humidity is not None]
     if (
         humid
         and max(humid) > s.settings.humidity_max
@@ -308,6 +361,27 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
             f"Humidity is {max(humid):.0f}%, above {s.settings.humidity_max:.0f}%. "
             "Dry mode removes moisture without much cooling.",
             Command(power=True, mode=HvacMode.DRY),
+        )
+
+
+def _close_ahead(s: HouseSnapshot, warm: bool) -> Iterable[Recommendation]:
+    """Suggest closing a room that is ahead while the others still need the unit."""
+    for zone in deciding_zones(s):
+        error = zone_error(s, zone)
+        ahead = error < -NEED_MARGIN if warm else error > NEED_MARGIN
+        if not ahead or not (zone.on and zone.opening > 0) or not airflow_ok(s, _without(s, zone)):
+            continue
+        band = zone_band(s, zone)
+        word, verb = ("above", "heat") if warm else ("below", "cool")
+        yield Recommendation(
+            f"zone_ahead_{zone.zone}",
+            "zoning",
+            Severity.SUGGEST,
+            f"Close {zone.name} while the other rooms {verb}",
+            f"It is {fmt(zone.temperature)}, {word} {fmt(band.high if warm else band.low)}. "
+            "Closed, it settles on its own while the rest of the house catches up.",
+            Command(zones={zone.zone: ZoneCommand(on=False)}),
+            zone.zone,
         )
 
 
@@ -451,6 +525,91 @@ def rule_zoning(s: HouseSnapshot) -> Iterable[Recommendation]:
             )
 
 
+# Health ---------------------------------------------------------------------------
+
+
+def _damp_advice(
+    s: HouseSnapshot, zone: ZoneInputs, humidity: float, safe: float | None, hours: float
+) -> tuple[str, Command | None]:
+    damp = f" for {hours:.1f} hours" if hours >= 0.5 else ""
+    start = f"Humidity is {humidity:.0f}% and its walls have been damp enough for mould{damp}."
+    cold_outside = s.outdoor_temp is not None and s.outdoor_temp <= (zone.temperature or 0) - 3
+    if cold_outside:
+        warmth = f" and keep it at {fmt(safe)} or warmer" if safe is not None else ""
+        action = (
+            Command(zones={zone.zone: ZoneCommand(on=True, opening=zone.max_opening or 100)})
+            if not zone.on and s.unit.power and s.unit.mode is HvacMode.HEAT
+            else None
+        )
+        return (
+            f"{start} Air it for 10 minutes (a window or the exhaust fan){warmth}: heating "
+            "alone does not remove the moisture.",
+            action,
+        )
+    action = Command(power=True, mode=HvacMode.DRY) if _supports(s, HvacMode.DRY) else None
+    return f"{start} Dry mode removes moisture without much cooling.", action
+
+
+def rule_health(s: HouseSnapshot) -> Iterable[Recommendation]:
+    """Mould, condensation, overheated and cold rooms."""
+    health = assess(s)
+    for zone in s.zones:
+        h = health.get(zone.zone)
+        if h is None:
+            continue
+        n, name = zone.zone, zone.name
+        if h.condensation and h.humidity is not None:
+            yield Recommendation(
+                f"health_condensation_{n}",
+                "health",
+                Severity.ALERT,
+                f"Condensation likely in {name}",
+                f"Humidity is {h.humidity:.0f}% and its coldest surfaces are at the dew point "
+                f"({fmt(h.dew_point)}). Wipe windows dry and air the room for 10 minutes.",
+                zone=n,
+            )
+        elif h.mould and h.humidity is not None:
+            reason, action = _damp_advice(
+                s, zone, h.humidity, h.safe_temperature, h.damp_minutes / 60
+            )
+            yield Recommendation(
+                f"health_mould_{n}",
+                "health",
+                Severity.ALERT,
+                f"Mould risk in {name}",
+                reason,
+                action,
+                n,
+            )
+        running = s.unit.mode if s.unit.power else None
+        if h.overheated:
+            yield Recommendation(
+                f"health_overheat_{n}",
+                "health",
+                Severity.ALERT,
+                f"{name} is too hot",
+                f"It is {fmt(h.temperature)}, above {fmt(h.ceiling)}, which disturbs sleep and "
+                "is hard on health.",
+                Command(power=True, mode=HvacMode.COOL, target_temp=_target(s, h.ceiling - 1))
+                if _supports(s, HvacMode.COOL) and running is not HvacMode.COOL
+                else None,
+                n,
+            )
+        elif h.too_cold:
+            yield Recommendation(
+                f"health_cold_{n}",
+                "health",
+                Severity.ALERT,
+                f"{name} is too cold",
+                f"It is {fmt(h.temperature)}, below {fmt(h.cold_limit)}, which is hard on health "
+                "and lets damp settle on cold walls.",
+                Command(power=True, mode=HvacMode.HEAT, target_temp=_target(s, h.cold_limit + 2))
+                if _supports(s, HvacMode.HEAT) and running is not HvacMode.HEAT
+                else None,
+                n,
+            )
+
+
 # Guest mode -----------------------------------------------------------------------
 
 
@@ -515,16 +674,31 @@ def rule_away(s: HouseSnapshot) -> Iterable[Recommendation]:
         return
     minutes = s.away_minutes or 0
     settings = s.settings
-    if minutes < settings.short_away_minutes and s.unit.mode in (HvacMode.HEAT, HvacMode.COOL):
+    view = outlook(s)
+    extreme = view.heatwave or view.cold_snap
+    if (minutes < settings.short_away_minutes or extreme) and s.unit.mode in (
+        HvacMode.HEAT,
+        HvacMode.COOL,
+    ):
         target = settings.heat_away if s.unit.mode is HvacMode.HEAT else settings.cool_away
         if s.unit.target_temp is not None and s.unit.target_temp == _target(s, target):
             return
+        if extreme and minutes >= settings.short_away_minutes:
+            what = "A heatwave" if view.heatwave else "A cold snap"
+            why = (
+                f"{what} is coming: holding {fmt(target)} keeps the house safe and quick to "
+                "recover, where off would not."
+            )
+        else:
+            why = (
+                f"For a short outing a setback to {fmt(target)} saves energy and recovers quickly."
+            )
         yield Recommendation(
             "away_setback",
             "away",
             Severity.SUGGEST,
             "Everyone is out: set back",
-            f"For a short outing a setback to {fmt(target)} saves energy and recovers quickly.",
+            why,
             Command(target_temp=_target(s, target)),
         )
     else:
@@ -552,6 +726,19 @@ def rule_weather(s: HouseSnapshot) -> Iterable[Recommendation]:
     """Pre-condition ahead of a hot day or a cold night."""
     if s.anyone_home is False:
         return
+    view = outlook(s)
+    if view.heatwave and view.hottest is not None:
+        band = house_band(s, Period.DAY)
+        when = f" at {view.hottest_at.strftime('%H:%M')}" if view.hottest_at else ""
+        yield Recommendation(
+            "weather_heatwave",
+            "weather",
+            Severity.INFO,
+            f"Heatwave: {fmt(view.hottest)}{when}",
+            "Close blinds on sunny windows and keep outside doors shut. Pre-cool in the "
+            f"morning while it is mild, then keep cooling at {fmt(band.high - 1)} or above: a "
+            "lower setpoint does not cool faster and overshoots once the heat breaks.",
+        )
     temps = _forecast_window(s, 12)
     if not temps:
         return
@@ -636,7 +823,7 @@ def rule_solar(s: HouseSnapshot) -> Iterable[Recommendation]:
 
 RULES: tuple[Callable[[HouseSnapshot], Iterable[Recommendation]], ...] = (
     rule_unit_health,
-    rule_mode,
+    rule_health,
     rule_setpoint,
     rule_zoning,
     rule_guest,
@@ -646,9 +833,14 @@ RULES: tuple[Callable[[HouseSnapshot], Iterable[Recommendation]], ...] = (
 )
 
 
-def evaluate(snapshot: HouseSnapshot) -> list[Recommendation]:
-    """Run every rule and return advice, most urgent first, without duplicates."""
+def evaluate(snapshot: HouseSnapshot, model: ThermalModel | None = None) -> list[Recommendation]:
+    """Run every rule and return advice, most urgent first, without duplicates.
+
+    ``model`` is what has been learned about the rooms, for advice about coasting.
+    """
     seen: dict[str, Recommendation] = {}
+    for rec in rule_mode(snapshot, model):
+        seen.setdefault(rec.id, rec)
     for rule in RULES:
         for rec in rule(snapshot):
             seen.setdefault(rec.id, rec)

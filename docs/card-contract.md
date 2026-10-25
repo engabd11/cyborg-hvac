@@ -32,12 +32,17 @@ The subscription survives the integration reloading (for example after a zone is
     {"zone": 1, "name": "MASTER", "device_id": "…", "on": true, "opening": 100,
      "temperature": 21.4, "humidity": 52, "occupied": true, "window_open": false, "door_open": false, "guest": false, "sleep": true,
      "band": {"low": 20.0, "high": 24.0}, "demand": 0, "weight": 1.0, "priority": "bedroom",
+     "role": "hold",
+     "health": {"dew_point": 9.8, "surface_humidity": 58, "damp_minutes": 0, "mould": false,
+                "condensation": false, "overheated": false, "too_cold": false, "floor": 16.0, "ceiling": 28.0},
      "entities": {"damper": "cover.master", "power": "switch.master_power"}}
   ],
   "house": {"period": "day", "band": {"low": 20.0, "high": 24.0}, "indoor": 21.3, "indoor_basis": "rooms",
             "deciding_zones": [1, 3, 4], "outdoor": 14.5,
-            "anyone_home": true, "demand": 12, "solar_export_w": 2400, "guest_mode": false,
-            "sleep_mode": false, "sleep_target": 23.0},
+            "anyone_home": true, "demand": 12, "solar_export_w": 2400,
+            "season": "heating", "heatwave": false, "peak": false, "cold_snap": false,
+            "hottest": 18.0, "hottest_at": "2026-10-25T15:00:00+11:00", "coldest": 9.0,
+            "guest_mode": false, "sleep_mode": false, "sleep_target": 23.0},
   "forecast": [{"time": "2026-10-25T15:00:00+11:00", "temperature": 18.0, "condition": "sunny"}],
   "advice": [{"id": "mode_heat", "category": "mode", "severity": "suggest", "title": "Heating recommended",
               "reason": "Rooms are below 20 °C. Heat to 21 °C.", "zone": null,
@@ -45,7 +50,10 @@ The subscription survives the integration reloading (for example after a zone is
   "autopilot": {"behaviours": {"presence_zoning": false, "room_balancing": true,
                                 "weather_precondition": true, "solar_shift": false},
                 "paused_until": null, "zones_paused": {"2": "2026-10-25T16:02:00+00:00"},
-                "last_action": {"time": "…", "action": {"zones": {"1": {"opening": 60}}}}},
+                "fan_paused_until": null,
+                "last_action": {"time": "…", "action": {"zones": {"1": {"opening": 60}}},
+                                "reason": "Heating HQ (19.5 °C). Letting MASTER (24 °C) cool on its own (8 °C outside)."},
+                "decision": {"mode": "heat", "reason": "…", "roles": {"1": "shed", "2": "serve", "3": "keeper"}}},
   "plan": {"blocks": [{"kind": "preheat", "start": "…", "end": "…", "mode": "heat", "target": 18.5,
                        "reason": "Rooms would be 16.8 °C by night. Warming from 20:40 has them at 18.5 °C in time."}],
            "periods": [{"start": "…", "end": "…", "period": "day", "band": {"low": 20.0, "high": 24.0}}],
@@ -63,6 +71,10 @@ The subscription survives the integration reloading (for example after a zone is
 - `window_open` is true once a window or door has stayed open past its delay; `door_open` says it is a door.
 - Plan block kinds: `preheat`, `precool` (weather pre-conditioning) and `solar` (banking while exporting).
 - `model.confident` turns true once a zone has about three hours of learning in each direction.
+- `role` is what autopilot is doing with the zone, `null` while autopilot is off: `serve` (needs air), `hold` (at its aim), `shed` (ahead of the house, closed until level), `setback` (empty or second), `keeper` (open so the fan has enough duct), `shut` (window or door open), `held` (a person's change) or `free` (not autopilot's to move).
+- `health` is `null` without a room temperature. `dew_point` and `surface_humidity` (at the coldest wall, estimated from outdoor) are `null` without a humidity reading; `damp_minutes` counts the last 12 hours. `floor` and `ceiling` are the healthy limits autopilot holds the room within.
+- `house.season` is `heating`, `cooling`, `shoulder`, or `null` without any outdoor reading or forecast. `peak` is true during a heatwave's hottest hours.
+- `autopilot.decision` is `null` while every behaviour is off. Its `mode` is what the house is doing (`heat`, `cool`, `dry`, or `null` while resting) and `reason` says why in plain words, as does `last_action.reason`.
 
 ## Actions
 

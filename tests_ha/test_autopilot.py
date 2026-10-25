@@ -42,10 +42,18 @@ async def test_room_balancing_moves_dampers_and_respects_manual_changes(
         blocking=True,
     )
     await _tick(hass, comfort)
-    assert system.zones[1].opening < 100
+    # Ahead of the others while they heat: closed in one write, not throttled in steps.
+    assert system.zones[1].on is False
     status = comfort.autopilot_status("demo_unit")
     assert status["behaviours"]["room_balancing"] is True
     assert status["last_action"] is not None
+    assert status["last_action"]["reason"]
+    # Autopilot's own change is not mistaken for a person's.
+    assert "1" not in status["zones_paused"]
+    assert status["decision"]["roles"]["1"] == "shed"
+    payload = comfort.as_dict("demo_unit")
+    assert payload["zones"][0]["role"] == "shed"
+    assert "season" in payload["house"]
 
     # A person moves zone 2's damper: autopilot leaves it alone for a while.
     await hass.services.async_call(

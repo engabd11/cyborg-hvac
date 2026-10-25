@@ -120,3 +120,48 @@ async def test_controller_opening_the_spill_zone_is_not_a_manual_change(
     await entry.runtime_data.coordinator.async_refresh()
     await hass.async_block_till_done()
     assert "4" not in comfort.autopilot_status("demo_unit")["zones_paused"]
+
+
+async def test_bedtime_on_a_cold_night_lets_the_bedroom_cool_instead_of_cooling(
+    hass: HomeAssistant,
+) -> None:
+    # The reported case: heating, bedroom warmer than bedtime, cold outside.
+    entry = await setup_demo(hass, names=("Master", "Office", "Living", "Dining"))
+    hass.states.async_set("sensor.outdoor", "8", {"unit_of_measurement": "°C"})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "inputs"}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"outdoor_sensor": "sensor.outdoor", "scan_interval": 30}
+    )
+    await hass.async_block_till_done()
+    await configure_zone(hass, entry, "Master", sleep_zone=True)
+    await configure_zone(hass, entry, "Dining", spill=True)
+    comfort = entry.runtime_data.comfort
+    system = entry.runtime_data.backend.system
+    system.power, system.mode, system.target = True, HvacMode.HEAT, 22.0
+    system.zones[1].temperature = 24.0
+    for n in (2, 3, 4):
+        system.zones[n].temperature = 21.5
+    await entry.runtime_data.coordinator.async_refresh()
+
+    await hass.services.async_call(
+        "number",
+        "set_value",
+        {"entity_id": "number.demo_ducted_unit_sleep_temperature", "value": 22},
+        blocking=True,
+    )
+    await hass.services.async_call(
+        "switch",
+        "turn_on",
+        {"entity_id": "switch.demo_ducted_unit_autopilot_bedtime"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+    assert system.mode is not HvacMode.COOL
+    # Off (resting) or turned down so it idles: outside brings the bedroom down.
+    assert system.power is False or system.target < 22.0
+    status = comfort.autopilot_status("demo_unit")
+    assert "on its own" in status["decision"]["reason"]
+    assert "on its own" in status["last_action"]["reason"]

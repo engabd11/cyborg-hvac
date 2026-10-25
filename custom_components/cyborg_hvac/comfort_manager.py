@@ -67,7 +67,7 @@ from .const import (
 from .core.model import Command
 from .entity import zone_subentries
 from .logic.advisor import Recommendation, command_as_dict, evaluate
-from .logic.balancing import BalanceMemory, balance_command
+from .logic.autopilot import AutopilotMemory, Decision, Switches, decide, note_sent
 from .logic.comfort import (
     current_period,
     deciding_zones,
@@ -84,19 +84,13 @@ from .logic.guard import (
     detect_override,
     filter_command,
     manual_command,
+    note_command,
     record,
 )
+from .logic.health import DampTracker, assess
 from .logic.openings import OpeningMemory, openings_command
-from .logic.planner import (
-    Plan,
-    SolarMemory,
-    periods,
-    precondition_blocks,
-    precondition_command,
-    solar_command,
-)
-from .logic.presence import PresenceMemory, presence_command
-from .logic.sleep import sleep_command
+from .logic.outlook import outlook
+from .logic.planner import Plan, periods, precondition_blocks
 from .logic.snapshot import (
     ComfortSettings,
     ForecastPoint,
@@ -180,18 +174,17 @@ class ComfortManager:
         self.guest_modes: dict[str, bool] = {}
         self.sleep_targets: dict[str, float] = {}
         self._openings: dict[str, OpeningMemory] = {}
-        self._sleep_memory: dict[str, BalanceMemory] = {}
         self.autopilot: dict[str, dict[str, bool]] = {}
         self.last_action: dict[str, dict[str, Any]] = {}
+        self.decisions: dict[str, Decision] = {}
         self.guard_config = GuardConfig()
         self._guards: dict[str, GuardState] = {}
-        self._balance: dict[str, BalanceMemory] = {}
-        self._presence_memory: dict[str, PresenceMemory] = {}
+        self._memory: dict[str, AutopilotMemory] = {}
+        self._damp: dict[str, DampTracker] = {}
         self._previous: dict[str, Any] = {}
         self._last_run: dict[str, datetime] = {}
         self.models: dict[str, ThermalModel] = {}
         self.plans: dict[str, Plan] = {}
-        self._solar: dict[str, SolarMemory] = {}
         self._samples: dict[str, tuple[datetime, ThermalSample]] = {}
         self._saved_at: datetime | None = None
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.thermal")
@@ -265,8 +258,15 @@ class ComfortManager:
 
     @callback
     def _on_command(self, unit_id: str, command: Any, source: str) -> None:
-        """Hold what a person changed through Home Assistant."""
-        if source != "autopilot" and self.autopilot_on(unit_id):
+        """Hold what a person changed through Home Assistant.
+
+        Autopilot's own commands are noted straight away: the coordinator shows
+        them before the send returns, and that update must not look like a
+        person's change.
+        """
+        if source == "autopilot":
+            note_command(self._guard(unit_id), command, dt_util.utcnow())
+        elif self.autopilot_on(unit_id):
             manual_command(self.guard_config, self._guard(unit_id), command, dt_util.utcnow())
 
     @callback
@@ -422,6 +422,7 @@ class ComfortManager:
         if state is None:
             return ()
         now = dt_util.utcnow()
+        damp = self._damp.setdefault(unit_id, DampTracker())
         zones = []
         for subentry in zone_subentries(self.coordinator):
             data = subentry.data
@@ -487,6 +488,7 @@ class ComfortManager:
                     spill=bool(data.get(CONF_SPILL, False)),
                     guest=bool(data.get(CONF_GUEST, False)),
                     sleep=sleep_zone,
+                    damp_minutes=damp.minutes(number),
                 )
             )
         return tuple(sorted(zones, key=lambda z: z.zone))
@@ -544,6 +546,9 @@ class ComfortManager:
             if snapshot is None:
                 continue
             self.snapshots[unit_id] = snapshot
+            self._damp.setdefault(unit_id, DampTracker()).observe(
+                snapshot.now, snapshot.zones, snapshot.outdoor_temp, snapshot.unit_humidity
+            )
             model = self.models.setdefault(unit_id, ThermalModel())
             solar = self.plans.get(unit_id)
             solar_blocks = [b for b in (solar.blocks if solar else []) if b.kind == "solar"]
@@ -558,7 +563,7 @@ class ComfortManager:
                 _LOGGER.exception("Could not build the plan for %s", unit_id)
                 self.plans[unit_id] = Plan()
             self.advice[unit_id] = [
-                rec for rec in evaluate(snapshot) if (unit_id, rec.id) not in self._dismissed
+                rec for rec in evaluate(snapshot, model) if (unit_id, rec.id) not in self._dismissed
             ]
         for unit_id in self.coordinator.units:
             await self._async_autopilot(unit_id)
@@ -567,10 +572,11 @@ class ComfortManager:
         async_dispatcher_send(self.hass, signal_update(self.entry.entry_id))
 
     async def _async_autopilot(self, unit_id: str) -> None:
-        """Let enabled behaviours act, within the guard rails."""
+        """Let the autopilot engine decide, within the guard rails."""
         enabled = self.autopilot.get(unit_id, {})
         snapshot = self.snapshots.get(unit_id)
         if not any(enabled.values()) or snapshot is None or not snapshot.unit.online:
+            self.decisions.pop(unit_id, None)
             return
         now = dt_util.utcnow()
         last = self._last_run.get(unit_id)
@@ -580,49 +586,40 @@ class ComfortManager:
         self._last_run[unit_id] = now
         guard = self._guard(unit_id)
         paused = {n for n in guard.zone_paused_until if guard.zone_paused(n, now)}
-        command = Command()
         plan = self.plans.get(unit_id) or Plan()
+        memory = self._memory.setdefault(unit_id, AutopilotMemory())
+        decision = decide(
+            snapshot,
+            Switches(
+                presence=enabled.get(PRESENCE_ZONING, False),
+                balancing=enabled.get(ROOM_BALANCING, False),
+                weather=enabled.get(WEATHER_PRECONDITION, False),
+                solar=enabled.get(SOLAR_SHIFT, False),
+                sleep=enabled.get(SLEEP_MODE, False),
+            ),
+            plan.blocks,
+            self.models.setdefault(unit_id, ThermalModel()),
+            memory,
+            paused,
+            minutes,
+        )
+        self.decisions[unit_id] = decision
+        plan.blocks = [b for b in plan.blocks if b.kind != "solar"] + (
+            [decision.solar_block] if decision.solar_block else []
+        )
+        # Open windows and doors win over everything else for their zones.
         openings = openings_command(snapshot, self._openings.setdefault(unit_id, OpeningMemory()))
-        if enabled.get(SLEEP_MODE):
-            # Sleep owns the unit until it is switched off.
-            command = sleep_command(
-                snapshot, self._sleep_memory.setdefault(unit_id, BalanceMemory()), minutes
-            )
-            command = Command(
-                power=command.power,
-                mode=command.mode,
-                target_temp=command.target_temp,
-                zones={n: c for n, c in command.zones.items() if n not in paused},
-            ).merge(Command(zones=openings.zones))
-            await self._async_send_autopilot(unit_id, snapshot, guard, command, now)
-            return
-        if enabled.get(WEATHER_PRECONDITION):
-            command = precondition_command(snapshot, plan.blocks)
-        solar_active = False
-        if enabled.get(SOLAR_SHIFT):
-            memory = self._solar.setdefault(unit_id, SolarMemory())
-            solar, block = solar_command(snapshot, memory)
-            command = command.merge(solar)
-            solar_active = memory.active
-            plan.blocks = [b for b in plan.blocks if b.kind != "solar"] + ([block] if block else [])
-        if enabled.get(ROOM_BALANCING):
-            balance = balance_command(
-                snapshot, self._balance.setdefault(unit_id, BalanceMemory()), minutes, paused
-            )
-            if solar_active or not command.is_empty:
-                balance = Command(zones=balance.zones)  # the plan owns the setpoint for now
-            command = command.merge(balance)
-        if enabled.get(PRESENCE_ZONING):
-            command = command.merge(
-                presence_command(
-                    snapshot, self._presence_memory.setdefault(unit_id, PresenceMemory())
-                )
-            )
-        command = command.merge(openings)
-        await self._async_send_autopilot(unit_id, snapshot, guard, command, now)
+        command = decision.command.merge(openings)
+        await self._async_send_autopilot(unit_id, snapshot, guard, command, now, decision.reason)
 
     async def _async_send_autopilot(
-        self, unit_id: str, snapshot: HouseSnapshot, guard: GuardState, command: Command, now
+        self,
+        unit_id: str,
+        snapshot: HouseSnapshot,
+        guard: GuardState,
+        command: Command,
+        now: datetime,
+        reason: str = "",
     ) -> None:
         allowed = filter_command(self.guard_config, guard, snapshot, command, now)
         if allowed is None:
@@ -633,22 +630,36 @@ class ComfortManager:
             _LOGGER.warning("Autopilot could not send %s: %s", allowed, err)
             return
         record(guard, allowed, now)
-        self.last_action[unit_id] = {"time": now.isoformat(), "action": command_as_dict(allowed)}
+        memory = self._memory.setdefault(unit_id, AutopilotMemory())
+        note_sent(memory, allowed, now, snapshot.unit.mode)
+        self.last_action[unit_id] = {
+            "time": now.isoformat(),
+            "action": command_as_dict(allowed),
+            "reason": reason,
+        }
 
     async def async_set_autopilot(self, unit_id: str, behaviour: str, enabled: bool) -> None:
         """Turn an autopilot behaviour on or off."""
         self.autopilot.setdefault(unit_id, {})[behaviour] = enabled
-        if not enabled:
-            self._balance.pop(unit_id, None)
-            self._sleep_memory.pop(unit_id, None)
-        if behaviour == SLEEP_MODE:
-            # Act straight away rather than waiting for the next minute.
-            self._last_run.pop(unit_id, None)
+        # What each room is aiming for has changed: decide afresh, and straight away,
+        # keeping only what the lighter behaviours need to put things back.
+        old = self._memory.pop(unit_id, None)
+        if old is not None:
+            self._memory[unit_id] = AutopilotMemory(
+                solar=old.solar,
+                presence=old.presence,
+                health_started=old.health_started,
+                mode_at=old.mode_at,
+                last_mode=old.last_mode,
+            )
+        self._last_run.pop(unit_id, None)
         await self._async_evaluate()
 
     async def async_set_sleep_target(self, unit_id: str, value: float) -> None:
         """Set the temperature sleep mode holds the sleep zones at."""
         self.sleep_targets[unit_id] = value
+        if unit_id in self._memory:
+            self._memory[unit_id].fresh = True
         self._last_run.pop(unit_id, None)
         await self._async_evaluate()
 
@@ -683,7 +694,14 @@ class ComfortManager:
                 for n, until in guard.zone_paused_until.items()
                 if guard.zone_paused(n, now)
             },
+            "fan_paused_until": guard.fan_paused_until.isoformat()
+            if guard.fan_paused(now) and guard.fan_paused_until
+            else None,
             "last_action": self.last_action.get(unit_id),
+            # What autopilot is doing now and why, with each zone's role.
+            "decision": decision.as_dict()
+            if (decision := self.decisions.get(unit_id)) is not None
+            else None,
         }
 
     async def async_set_guest_mode(self, unit_id: str, enabled: bool) -> None:
@@ -756,9 +774,13 @@ class ComfortManager:
             return device.id if device else None
 
         band = house_band(snapshot)
+        decision = self.decisions.get(unit_id)
+        health = decision.health if decision else assess(snapshot)
+        view = decision.outlook if decision else outlook(snapshot)
         zones = []
         for zone in snapshot.zones:
             zband = zone_band(snapshot, zone)
+            zhealth = health.get(zone.zone)
             zones.append(
                 {
                     "zone": zone.zone,
@@ -779,6 +801,11 @@ class ComfortManager:
                     # How much this room counts in the house average (0 without a sensor).
                     "weight": round(zone_weight(snapshot, zone), 2) if zone.has_sensor else 0,
                     "priority": zone.priority.value,
+                    # What autopilot is doing with the zone (serve, hold, shed...), if on.
+                    "role": role.value
+                    if decision and (role := decision.roles.get(zone.zone))
+                    else None,
+                    "health": zhealth.as_dict() if zhealth else None,
                     "entities": {
                         "damper": entity_id("cover", f"{unit_id}_zone{zone.zone}_damper"),
                         "power": entity_id("switch", f"{unit_id}_zone{zone.zone}_power"),
@@ -844,6 +871,7 @@ class ComfortManager:
                 "anyone_home": snapshot.anyone_home,
                 "demand": round(house_demand(snapshot)),
                 "solar_export_w": snapshot.solar_export_w,
+                **view.as_dict(),
                 "guest_mode": snapshot.guest_mode,
                 "sleep_mode": snapshot.sleep_mode,
                 "sleep_target": snapshot.sleep_target,

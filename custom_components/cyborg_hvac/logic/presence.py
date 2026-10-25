@@ -18,8 +18,13 @@ class PresenceMemory:
     before_away: Command | None = None
 
 
-def presence_command(s: HouseSnapshot, memory: PresenceMemory) -> Command:
-    """Return zone and unit changes for who is home and where."""
+def presence_command(s: HouseSnapshot, memory: PresenceMemory, *, extreme: bool = False) -> Command:
+    """Return zone and unit changes for who is home and where.
+
+    ``extreme`` (a heatwave or cold snap) keeps the away setback rather than
+    switching off: recovering from a hot or cold house takes hours, and the
+    house itself is better kept within the away band.
+    """
     settings = s.settings
     zones: dict[int, ZoneCommand] = {}
     unit = s.unit
@@ -28,7 +33,7 @@ def presence_command(s: HouseSnapshot, memory: PresenceMemory) -> Command:
         minutes = s.away_minutes or 0
         if memory.before_away is None:
             memory.before_away = Command(power=True, mode=unit.mode, target_temp=unit.target_temp)
-        if minutes >= settings.short_away_minutes:
+        if minutes >= settings.short_away_minutes and not extreme:
             memory.away_off = True
             return Command(power=False)
         if unit.mode in (HvacMode.HEAT, HvacMode.COOL):

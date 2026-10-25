@@ -6,6 +6,9 @@ dT/dt = loss * (outdoor - room) + gain * share * output
 ``gain`` while it runs (what the unit adds beyond the drift). Both start at
 sensible defaults and move slowly, so one odd reading (a door left open)
 does little harm.
+
+Each room also remembers its holding opening: the damper opening that kept it
+at its aim in heating and in cooling, learned from how it drifted off.
 """
 
 from __future__ import annotations
@@ -31,11 +34,24 @@ class ZoneModel:
     gain: float = DEFAULT_GAIN
     loss_samples: int = 0
     gain_samples: int = 0
+    hold_heat: int | None = None
+    hold_cool: int | None = None
 
     @property
     def confident(self) -> bool:
         """Return True once both terms have enough data."""
         return self.loss_samples >= LEARNED_SAMPLES and self.gain_samples >= LEARNED_SAMPLES
+
+    def hold(self, mode: HvacMode) -> int | None:
+        """Return the learned holding opening for a mode, if any."""
+        return self.hold_heat if mode is HvacMode.HEAT else self.hold_cool
+
+    def set_hold(self, mode: HvacMode, opening: int) -> None:
+        """Remember the holding opening for a mode."""
+        if mode is HvacMode.HEAT:
+            self.hold_heat = opening
+        else:
+            self.hold_cool = opening
 
 
 @dataclass(slots=True)
@@ -107,6 +123,24 @@ class ThermalModel:
             temp += model.loss * (outdoor - temp) + sign * model.gain * share
         return None
 
+    def minutes_to_drift(
+        self, number: int, start: float, target: float, outdoors: list[float]
+    ) -> int | None:
+        """Return minutes for a room left alone to drift from ``start`` to ``target``.
+
+        ``outdoors`` holds one outdoor temperature per minute. None when the room
+        does not get there within that time, for example when outside pushes it
+        the other way.
+        """
+        model = self.zone(number)
+        temp = start
+        falling = target < start
+        for minute, outdoor in enumerate(outdoors):
+            if (temp <= target) if falling else (temp >= target):
+                return minute
+            temp += model.loss * (outdoor - temp)
+        return None
+
     def drift(self, number: int, start: float, outdoors: list[float]) -> float:
         """Return a room's temperature after drifting one minute per outdoor value."""
         model = self.zone(number)
@@ -123,6 +157,8 @@ class ThermalModel:
                 "gain": m.gain,
                 "loss_samples": m.loss_samples,
                 "gain_samples": m.gain_samples,
+                "hold_heat": m.hold_heat,
+                "hold_cool": m.hold_cool,
             }
             for n, m in self.zones.items()
         }
@@ -138,7 +174,13 @@ class ThermalModel:
                     gain=float(value["gain"]),
                     loss_samples=int(value.get("loss_samples", 0)),
                     gain_samples=int(value.get("gain_samples", 0)),
+                    hold_heat=_opening(value.get("hold_heat")),
+                    hold_cool=_opening(value.get("hold_cool")),
                 )
             except (KeyError, TypeError, ValueError):
                 continue
         return model
+
+
+def _opening(value: Any) -> int | None:
+    return int(value) if isinstance(value, int | float) else None
