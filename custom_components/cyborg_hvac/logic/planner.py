@@ -1,0 +1,307 @@
+"""The 24 hour plan: comfort periods, pre-conditioning and solar banking."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta
+from typing import Any
+
+from ..core.model import Command, HvacMode
+from .comfort import Band, house_band, indoor_temperature
+from .snapshot import ForecastPoint, HouseSnapshot, Period
+from .thermal import ThermalModel
+
+SAFETY_FACTOR = 1.25
+HOT_SPIKE_MARGIN = 8.0
+SOLAR_START_W = 1500.0
+SOLAR_STOP_W = 600.0
+BANK_DEGREES = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class PlanBlock:
+    """A stretch of time where the plan wants the unit doing something."""
+
+    kind: str  # preheat, precool, solar
+    start: datetime
+    end: datetime
+    mode: HvacMode
+    target: float
+    reason: str
+
+    def active(self, now: datetime) -> bool:
+        """Return True while the block is running."""
+        return self.start <= now < self.end
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly form for the card."""
+        return {
+            "kind": self.kind,
+            "start": self.start.isoformat(),
+            "end": self.end.isoformat(),
+            "mode": self.mode.value,
+            "target": self.target,
+            "reason": self.reason,
+        }
+
+
+@dataclass(slots=True)
+class SolarMemory:
+    """Whether solar banking is running, and what to put back afterwards."""
+
+    active: bool = False
+    restore: Command | None = None
+
+
+@dataclass(slots=True)
+class Plan:
+    """Everything the card draws on its timeline."""
+
+    blocks: list[PlanBlock] = field(default_factory=list)
+    periods: list[dict[str, Any]] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly form."""
+        return {"blocks": [b.as_dict() for b in self.blocks], "periods": self.periods}
+
+
+def _next_at(now: datetime, at: time) -> datetime:
+    candidate = now.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+    return candidate if candidate > now else candidate + timedelta(days=1)
+
+
+def _outdoor_series(s: HouseSnapshot, until: datetime) -> list[float]:
+    """Return one outdoor temperature per minute from now until ``until``."""
+    points = [p for p in s.forecast if p.temperature is not None]
+    minutes = max(0, int((until - s.now).total_seconds() // 60))
+    fallback = s.outdoor_temp
+    series: list[float] = []
+    for minute in range(minutes):
+        at = s.now + timedelta(minutes=minute)
+        value = _at(points, at, fallback)
+        if value is None:
+            return []
+        series.append(value)
+    return series
+
+
+def _at(points: list[ForecastPoint], at: datetime, fallback: float | None) -> float | None:
+    before = [p for p in points if p.time <= at]
+    after = [p for p in points if p.time > at]
+    if before and after:
+        a, b = before[-1], after[0]
+        span = (b.time - a.time).total_seconds() or 1
+        frac = (at - a.time).total_seconds() / span
+        return a.temperature + (b.temperature - a.temperature) * frac  # type: ignore[operator]
+    if before:
+        return before[-1].temperature
+    if after:
+        return after[0].temperature if fallback is None else fallback
+    return fallback
+
+
+def periods(s: HouseSnapshot, hours: int = 24) -> list[dict[str, Any]]:
+    """Return day and night stretches with their bands for the next ``hours``."""
+    settings = s.settings
+    end = s.now + timedelta(hours=hours)
+    marks = sorted(
+        {_next_at(s.now, settings.night_start) + timedelta(days=d) for d in range(2)}
+        | {_next_at(s.now, settings.night_end) + timedelta(days=d) for d in range(2)}
+    )
+    result = []
+    cursor = s.now
+    for mark in [m for m in marks if m < end] + [end]:
+        mid = cursor + (mark - cursor) / 2
+        night = _is_night(mid.time(), settings.night_start, settings.night_end)
+        period = Period.NIGHT if night else Period.DAY
+        band = house_band(s, period)
+        result.append(
+            {
+                "start": cursor.isoformat(),
+                "end": mark.isoformat(),
+                "period": period.value,
+                "band": {"low": band.low, "high": band.high},
+            }
+        )
+        cursor = mark
+    return result
+
+
+def _is_night(at: time, start: time, end: time) -> bool:
+    return at >= start or at < end if start > end else start <= at < end
+
+
+def _share(s: HouseSnapshot, zone_count: int) -> float:
+    open_zones = len(s.open_zones) or zone_count or 1
+    return 1.0 / open_zones
+
+
+def precondition_blocks(s: HouseSnapshot, model: ThermalModel) -> list[PlanBlock]:
+    """Start early enough to be in band when the next period or a heat spike arrives."""
+    blocks: list[PlanBlock] = []
+    if s.anyone_home is False:
+        return blocks
+    zones = [z for z in s.sensed_zones if z.occupied is not False] or list(s.sensed_zones)
+    indoor = indoor_temperature(s)
+    if indoor is None:
+        return blocks
+    share = _share(s, len(s.zones))
+    settings = s.settings
+    for at, period in (
+        (_next_at(s.now, settings.night_start), Period.NIGHT),
+        (_next_at(s.now, settings.night_end), Period.DAY),
+    ):
+        outdoors = _outdoor_series(s, at)
+        if not outdoors:
+            continue
+        band = house_band(s, period)
+        for zone in zones or ():
+            arriving = model.drift(zone.zone, zone.temperature, outdoors)  # type: ignore[arg-type]
+            block = _lift(s, model, zone.zone, arriving, band, at, outdoors[-1], share, period)
+            if block:
+                blocks.append(block)
+                break
+        else:
+            if not zones:
+                arriving = model.drift(0, indoor, outdoors)
+                block = _lift(s, model, 0, arriving, band, at, outdoors[-1], share, period)
+                if block:
+                    blocks.append(block)
+
+    # A heat spike in the next 12 hours: be cool before it arrives.
+    spike = [
+        p
+        for p in s.forecast
+        if p.temperature is not None and s.now <= p.time <= s.now + timedelta(hours=12)
+    ]
+    day = house_band(s, Period.DAY)
+    if spike:
+        hottest = max(spike, key=lambda p: p.temperature)  # type: ignore[arg-type, return-value]
+        if hottest.temperature >= day.high + HOT_SPIKE_MARGIN:  # type: ignore[operator]
+            target = s.caps.round_temp(day.high - 1)
+            need = model.minutes_to_reach(
+                zones[0].zone if zones else 0,
+                indoor,
+                target,
+                hottest.temperature,  # type: ignore[arg-type]
+                HvacMode.COOL,
+                share,
+            )
+            lead = timedelta(minutes=(need or 120) * SAFETY_FACTOR)
+            start = max(s.now, hottest.time - timedelta(hours=3) - lead)
+            if start < hottest.time:
+                blocks.append(
+                    PlanBlock(
+                        "precool",
+                        start,
+                        hottest.time - timedelta(hours=3),
+                        HvacMode.COOL,
+                        target,
+                        f"{hottest.temperature:g} °C forecast at "
+                        f"{hottest.time.strftime('%H:%M')}. Cooling ahead of the heat costs "
+                        "less than fighting it.",
+                    )
+                )
+    return [b for b in blocks if b.end > s.now]
+
+
+def _lift(
+    s: HouseSnapshot,
+    model: ThermalModel,
+    zone: int,
+    arriving: float,
+    band: Band,
+    at: datetime,
+    outdoor: float,
+    share: float,
+    period: Period,
+) -> PlanBlock | None:
+    label = "night" if period is Period.NIGHT else "the morning"
+    if arriving < band.low - 0.3 and HvacMode.HEAT in s.caps.hvac_modes:
+        target = s.caps.round_temp(band.low + 0.5)
+        need = model.minutes_to_reach(zone, arriving, target, outdoor, HvacMode.HEAT, share)
+        lead = timedelta(minutes=(need if need is not None else 180) * SAFETY_FACTOR)
+        return PlanBlock(
+            "preheat",
+            max(s.now, at - lead),
+            at,
+            HvacMode.HEAT,
+            target,
+            f"Rooms would be {arriving:.1f} °C by {label}. Warming from "
+            f"{(at - lead).strftime('%H:%M')} has them at {target:g} °C in time.",
+        )
+    if arriving > band.high + 0.3 and HvacMode.COOL in s.caps.hvac_modes:
+        target = s.caps.round_temp(band.high - 0.5)
+        need = model.minutes_to_reach(zone, arriving, target, outdoor, HvacMode.COOL, share)
+        lead = timedelta(minutes=(need if need is not None else 180) * SAFETY_FACTOR)
+        return PlanBlock(
+            "precool",
+            max(s.now, at - lead),
+            at,
+            HvacMode.COOL,
+            target,
+            f"Rooms would be {arriving:.1f} °C by {label}. Cooling from "
+            f"{(at - lead).strftime('%H:%M')} has them at {target:g} °C in time.",
+        )
+    return None
+
+
+def precondition_command(s: HouseSnapshot, blocks: list[PlanBlock]) -> Command:
+    """Return what an active pre-conditioning block asks the unit to do."""
+    for block in blocks:
+        if block.kind == "solar" or not block.active(s.now):
+            continue
+        unit = s.unit
+        if unit.power and unit.mode is block.mode:
+            if (
+                unit.target_temp is None
+                or (block.mode is HvacMode.HEAT and unit.target_temp < block.target)
+                or (block.mode is HvacMode.COOL and unit.target_temp > block.target)
+            ):
+                return Command(target_temp=block.target)
+            return Command()
+        if unit.power and unit.mode is not block.mode:
+            return Command()  # someone chose another mode; do not fight it
+        return Command(power=True, mode=block.mode, target_temp=block.target)
+    return Command()
+
+
+def solar_command(s: HouseSnapshot, memory: SolarMemory) -> tuple[Command, PlanBlock | None]:
+    """Bank up to a degree of comfort while spare solar is exported."""
+    export = s.solar_export_w or 0.0
+    band = house_band(s)
+    indoor = indoor_temperature(s)
+    outdoor = s.outdoor_temp
+    unit = s.unit
+    if memory.active and (export < SOLAR_STOP_W or s.anyone_home is False):
+        memory.active = False
+        restore, memory.restore = memory.restore, None
+        return (restore or Command()), None
+    if memory.active:
+        mode = unit.mode or HvacMode.COOL
+        return Command(), _solar_block(s, mode, unit.target_temp or band.middle)
+    if export < SOLAR_START_W or indoor is None or outdoor is None or s.anyone_home is False:
+        return Command(), None
+    if outdoor > band.high and HvacMode.COOL in s.caps.hvac_modes:
+        mode, target = HvacMode.COOL, max(band.low + 0.5, band.high - 1 - BANK_DEGREES)
+    elif outdoor < band.low and HvacMode.HEAT in s.caps.hvac_modes:
+        mode, target = HvacMode.HEAT, min(band.high - 0.5, band.low + 1 + BANK_DEGREES)
+    else:
+        return Command(), None
+    if unit.power and unit.mode not in (mode, None):
+        return Command(), None
+    target = s.caps.round_temp(target)
+    memory.active = True
+    memory.restore = Command(target_temp=unit.target_temp) if unit.power else Command(power=False)
+    return Command(power=True, mode=mode, target_temp=target), _solar_block(s, mode, target)
+
+
+def _solar_block(s: HouseSnapshot, mode: HvacMode, target: float) -> PlanBlock:
+    return PlanBlock(
+        "solar",
+        s.now,
+        s.now + timedelta(minutes=30),
+        mode,
+        target,
+        f"Exporting {(s.solar_export_w or 0) / 1000:.1f} kW: banking comfort while power is free.",
+    )

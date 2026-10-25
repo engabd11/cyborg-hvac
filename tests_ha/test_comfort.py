@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -178,3 +180,42 @@ async def test_unload_stops_comfort(hass: HomeAssistant) -> None:
     assert hass.services.has_service(DOMAIN, "apply_recommendation")
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
     assert result["type"] is FlowResultType.MENU
+
+
+async def test_forecast_drives_the_plan(hass: HomeAssistant) -> None:
+    from homeassistant.core import ServiceResponse, SupportsResponse
+    from homeassistant.util import dt as dt_util
+
+    start = dt_util.now().replace(minute=0, second=0, microsecond=0)
+
+    async def get_forecasts(call) -> ServiceResponse:
+        return {
+            call.data["entity_id"]: {
+                "forecast": [
+                    {"datetime": (start + timedelta(hours=h)).isoformat(), "temperature": 2.0}
+                    for h in range(30)
+                ]
+            }
+        }
+
+    hass.services.async_register(
+        "weather", "get_forecasts", get_forecasts, supports_response=SupportsResponse.ONLY
+    )
+    hass.states.async_set("weather.bom", "cloudy", {"temperature": 3.0})
+    entry = await setup_demo(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {"next_step_id": "inputs"}
+    )
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {"weather_entity": "weather.bom", "scan_interval": 30}
+    )
+    await hass.async_block_till_done()
+    comfort = entry.runtime_data.comfort
+    payload = comfort.as_dict("demo_unit")
+    assert payload["forecast_hours"] >= 24
+    assert payload["house"]["outdoor"] == 3.0
+    kinds = {b["kind"] for b in payload["plan"]["blocks"]}
+    assert "preheat" in kinds  # a freezing night ahead of a cool house
+    assert payload["plan"]["periods"]
+    assert hass.states.get("switch.demo_ducted_unit_autopilot_weather_pre_conditioning")

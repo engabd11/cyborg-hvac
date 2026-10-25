@@ -199,6 +199,12 @@
       },
       "room_balancing": {
         "name": "Autopilot: room balancing"
+      },
+      "weather_precondition": {
+        "name": "Autopilot: weather pre-conditioning"
+      },
+      "solar_shift": {
+        "name": "Autopilot: solar shifting"
       }
     },
     "select": {

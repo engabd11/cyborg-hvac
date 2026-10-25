@@ -17,6 +17,7 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -72,6 +73,14 @@ from .logic.guard import (
     manual_command,
     record,
 )
+from .logic.planner import (
+    Plan,
+    SolarMemory,
+    periods,
+    precondition_blocks,
+    precondition_command,
+    solar_command,
+)
 from .logic.presence import PresenceMemory, presence_command
 from .logic.snapshot import (
     ComfortSettings,
@@ -80,6 +89,7 @@ from .logic.snapshot import (
     Priority,
     ZoneInputs,
 )
+from .logic.thermal import ThermalModel, ThermalSample
 from .ws import signal_update
 
 if TYPE_CHECKING:
@@ -91,7 +101,12 @@ _LOGGER = logging.getLogger(__name__)
 
 PRESENCE_ZONING = "presence_zoning"
 ROOM_BALANCING = "room_balancing"
-BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING)
+WEATHER_PRECONDITION = "weather_precondition"
+SOLAR_SHIFT = "solar_shift"
+BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING, WEATHER_PRECONDITION, SOLAR_SHIFT)
+SAMPLE_EVERY = timedelta(minutes=5)
+SAVE_EVERY = timedelta(minutes=30)
+STORE_VERSION = 1
 AUTOPILOT_MIN_GAP = timedelta(seconds=55)
 
 HOME_STATES = {"home", "on"}
@@ -153,6 +168,12 @@ class ComfortManager:
         self._presence_memory: dict[str, PresenceMemory] = {}
         self._previous: dict[str, Any] = {}
         self._last_run: dict[str, datetime] = {}
+        self.models: dict[str, ThermalModel] = {}
+        self.plans: dict[str, Plan] = {}
+        self._solar: dict[str, SolarMemory] = {}
+        self._samples: dict[str, tuple[datetime, ThermalSample]] = {}
+        self._saved_at: datetime | None = None
+        self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.thermal")
         self._forecast: tuple[ForecastPoint, ...] = ()
         self._forecast_at: datetime | None = None
         self._listeners: list[Callable[[], None]] = []
@@ -170,6 +191,9 @@ class ComfortManager:
             self._unsubs.append(
                 async_track_state_change_event(self.hass, watched, self._on_input_change)
             )
+        stored = await self._store.async_load() or {}
+        for unit_id in self.coordinator.units:
+            self.models[unit_id] = ThermalModel.from_dict(stored.get(unit_id))
         self._unsubs.append(self.coordinator.async_add_listener(self._on_unit_update))
         self._unsubs.append(self.coordinator.async_add_command_listener(self._on_command))
         for unit_id in self.coordinator.units:
@@ -183,7 +207,8 @@ class ComfortManager:
         await self._async_evaluate()
 
     async def async_stop(self) -> None:
-        """Stop tracking."""
+        """Stop tracking and save what was learned."""
+        await self._async_save()
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
@@ -244,7 +269,39 @@ class ComfortManager:
     async def _on_interval(self, _now: datetime) -> None:
         if self._forecast_due():
             await self._async_refresh_forecast()
+        self._learn()
         await self._async_evaluate()
+        if self._saved_at is None or dt_util.utcnow() - self._saved_at > SAVE_EVERY:
+            await self._async_save()
+
+    async def _async_save(self) -> None:
+        self._saved_at = dt_util.utcnow()
+        await self._store.async_save({uid: m.as_dict() for uid, m in self.models.items()})
+
+    def _learn(self) -> None:
+        """Feed a five-minute sample of every unit into its thermal model."""
+        now = dt_util.utcnow()
+        for unit_id, snapshot in self.snapshots.items():
+            zones = [z for z in snapshot.zones if z.temperature is not None]
+            if not zones:
+                continue
+            total = sum(z.opening for z in snapshot.zones if z.on and z.opening > 0) or 1
+            sample = ThermalSample(
+                temps={z.zone: z.temperature for z in zones},  # type: ignore[misc]
+                outdoor=snapshot.outdoor_temp,
+                running=snapshot.unit.power,
+                mode=snapshot.unit.mode,
+                shares={z.zone: (z.opening / total if z.on else 0.0) for z in snapshot.zones},
+            )
+            previous = self._samples.get(unit_id)
+            if previous is None or now - previous[0] >= SAMPLE_EVERY:
+                if previous is not None:
+                    minutes = (now - previous[0]).total_seconds() / 60
+                    if minutes <= 20:
+                        self.models.setdefault(unit_id, ThermalModel()).learn(
+                            previous[1], sample, minutes
+                        )
+                self._samples[unit_id] = (now, sample)
 
     # Listeners --------------------------------------------------------------------
 
@@ -416,6 +473,14 @@ class ComfortManager:
             if snapshot is None:
                 continue
             self.snapshots[unit_id] = snapshot
+            model = self.models.setdefault(unit_id, ThermalModel())
+            solar = self.plans.get(unit_id)
+            solar_blocks = [b for b in (solar.blocks if solar else []) if b.kind == "solar"]
+            self.plans[unit_id] = Plan(
+                blocks=precondition_blocks(snapshot, model)
+                + [b for b in solar_blocks if b.end > snapshot.now],
+                periods=periods(snapshot),
+            )
             self.advice[unit_id] = [
                 rec for rec in evaluate(snapshot) if (unit_id, rec.id) not in self._dismissed
             ]
@@ -440,10 +505,23 @@ class ComfortManager:
         guard = self._guard(unit_id)
         paused = {n for n in guard.zone_paused_until if guard.zone_paused(n, now)}
         command = Command()
+        plan = self.plans.get(unit_id) or Plan()
+        if enabled.get(WEATHER_PRECONDITION):
+            command = precondition_command(snapshot, plan.blocks)
+        solar_active = False
+        if enabled.get(SOLAR_SHIFT):
+            memory = self._solar.setdefault(unit_id, SolarMemory())
+            solar, block = solar_command(snapshot, memory)
+            command = command.merge(solar)
+            solar_active = memory.active
+            plan.blocks = [b for b in plan.blocks if b.kind != "solar"] + ([block] if block else [])
         if enabled.get(ROOM_BALANCING):
-            command = balance_command(
+            balance = balance_command(
                 snapshot, self._balance.setdefault(unit_id, BalanceMemory()), minutes, paused
             )
+            if solar_active or not command.is_empty:
+                balance = Command(zones=balance.zones)  # the plan owns the setpoint for now
+            command = command.merge(balance)
         if enabled.get(PRESENCE_ZONING):
             command = command.merge(
                 presence_command(
@@ -637,7 +715,18 @@ class ComfortManager:
                 for p in snapshot.forecast[:24]
             ],
             "advice": [rec.as_dict() for rec in self.advice.get(unit_id, [])],
+            "forecast_hours": len(snapshot.forecast),
             "autopilot": self.autopilot_status(unit_id),
-            "plan": [],
+            "plan": {
+                **(self.plans.get(unit_id) or Plan()).as_dict(),
+                "model": {
+                    str(n): {
+                        "loss": round(m.loss, 5),
+                        "gain": round(m.gain, 4),
+                        "confident": m.confident,
+                    }
+                    for n, m in (self.models.get(unit_id) or ThermalModel()).zones.items()
+                },
+            },
             "updated": snapshot.now.isoformat(),
         }

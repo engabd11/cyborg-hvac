@@ -36,8 +36,15 @@ The subscription survives the integration reloading (for example after a zone is
   "advice": [{"id": "mode_heat", "category": "mode", "severity": "suggest", "title": "Heating recommended",
               "reason": "Rooms are below 20 °C. Heat to 21 °C.", "zone": null,
               "action": {"power": true, "mode": "heat", "target_temp": 21.0}}],
-  "autopilot": {},
-  "plan": [],
+  "autopilot": {"behaviours": {"presence_zoning": false, "room_balancing": true,
+                                "weather_precondition": true, "solar_shift": false},
+                "paused_until": null, "zones_paused": {"2": "2026-10-25T16:02:00+00:00"},
+                "last_action": {"time": "…", "action": {"zones": {"1": {"opening": 60}}}}},
+  "plan": {"blocks": [{"kind": "preheat", "start": "…", "end": "…", "mode": "heat", "target": 18.5,
+                       "reason": "Rooms would be 16.8 °C by night. Warming from 20:40 has them at 18.5 °C in time."}],
+           "periods": [{"start": "…", "end": "…", "period": "day", "band": {"low": 20.0, "high": 24.0}}],
+           "model": {"1": {"loss": 0.0015, "gain": 0.15, "confident": false}}},
+  "forecast_hours": 48,
   "updated": "2026-10-25T14:02:11+11:00"
 }
 ```
@@ -45,13 +52,16 @@ The subscription survives the integration reloading (for example after a zone is
 - `demand` runs from 100 (needs full heating) to the same figure in the cooling direction, sent as a negative number. The card shows it as words or colour, never with a minus sign.
 - `occupied` is `null` when a zone has no presence sensor.
 - `band` is the comfortable range for that zone right now (period, presence, guest mode and offset applied).
-- `autopilot` and `plan` are filled in by later releases; cards treat missing data as empty.
+- Zones carry `paused: true` while a manual change holds autopilot for them.
+- Plan block kinds: `preheat`, `precool` (weather pre-conditioning) and `solar` (banking while exporting).
+- `model.confident` turns true once a zone has about three hours of learning in each direction.
 
 ## Actions
 
 - Apply or dismiss advice: services `cyborg_hvac.apply_recommendation` and `cyborg_hvac.dismiss_recommendation` with `recommendation` (the id) and `unit_id`.
 - Zones: `cover.set_cover_position`, `cover.open_cover`, `cover.close_cover` on `entities.damper`.
 - Unit: the usual `climate` services on `unit.climate`.
-- Guest mode: `switch` services on the unit's Guest mode switch.
+- Guest mode and the four autopilot behaviours: `switch` services on the unit's switches.
+- Hold or release autopilot: `cyborg_hvac.pause_autopilot` (minutes) and `cyborg_hvac.resume_autopilot`.
 
 A card must ignore unknown fields and degrade when `schema` is higher than it knows.
