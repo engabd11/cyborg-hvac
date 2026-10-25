@@ -130,16 +130,22 @@ def indoor_temperature(snapshot: HouseSnapshot) -> float | None:
     )
 
 
-def needs(snapshot: HouseSnapshot) -> tuple[bool, bool]:
-    """Return (needs heat, needs cool) across occupied zones with sensors.
-
-    Without room sensors the unit's own reading stands in for the house.
-    """
+def deciding_zones(snapshot: HouseSnapshot) -> list[ZoneInputs]:
+    """Return the rooms with sensors that decide what the house needs right now."""
     zones = [z for z in snapshot.sensed_zones if z.occupied is not False]
     if snapshot.sleep_mode:
         zones = [z for z in snapshot.sensed_zones if z.sleep] or zones
     elif snapshot.guest_mode:
         zones = [z for z in snapshot.sensed_zones if z.guest] or zones
+    return zones
+
+
+def needs(snapshot: HouseSnapshot) -> tuple[bool, bool]:
+    """Return (needs heat, needs cool) across occupied zones with sensors.
+
+    Without room sensors the unit's own reading stands in for the house.
+    """
+    zones = deciding_zones(snapshot)
     if not zones and not snapshot.sensed_zones:
         temp = snapshot.unit.current_temp
         if temp is None:

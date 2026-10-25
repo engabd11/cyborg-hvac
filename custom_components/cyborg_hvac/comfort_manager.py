@@ -70,11 +70,13 @@ from .logic.advisor import Recommendation, command_as_dict, evaluate
 from .logic.balancing import BalanceMemory, balance_command
 from .logic.comfort import (
     current_period,
+    deciding_zones,
     house_band,
     house_demand,
     indoor_temperature,
     zone_band,
     zone_demand,
+    zone_weight,
 )
 from .logic.guard import (
     GuardConfig,
@@ -774,6 +776,9 @@ class ComfortManager:
                     "paused": self._guard(unit_id).zone_paused(zone.zone, dt_util.utcnow()),
                     "band": {"low": zband.low, "high": zband.high},
                     "demand": zone_demand(snapshot, zone),
+                    # How much this room counts in the house average (0 without a sensor).
+                    "weight": round(zone_weight(snapshot, zone), 2) if zone.has_sensor else 0,
+                    "priority": zone.priority.value,
                     "entities": {
                         "damper": entity_id("cover", f"{unit_id}_zone{zone.zone}_damper"),
                         "power": entity_id("switch", f"{unit_id}_zone{zone.zone}_power"),
@@ -823,6 +828,18 @@ class ComfortManager:
                 "period": current_period(snapshot).value,
                 "band": {"low": band.low, "high": band.high},
                 "indoor": indoor_temperature(snapshot),
+                # What the indoor figure is: the rooms' weighted average, the sleep
+                # zones in bedtime, the guest zones in guest mode, or the unit itself.
+                "indoor_basis": (
+                    "return_air"
+                    if not snapshot.sensed_zones
+                    else "sleep"
+                    if snapshot.sleep_mode and any(z.sleep for z in snapshot.sensed_zones)
+                    else "guest"
+                    if snapshot.guest_mode and any(z.guest for z in snapshot.sensed_zones)
+                    else "rooms"
+                ),
+                "deciding_zones": [z.zone for z in deciding_zones(snapshot)],
                 "outdoor": snapshot.outdoor_temp,
                 "anyone_home": snapshot.anyone_home,
                 "demand": round(house_demand(snapshot)),

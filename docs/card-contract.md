@@ -31,10 +31,11 @@ The subscription survives the integration reloading (for example after a zone is
   "zones": [
     {"zone": 1, "name": "MASTER", "device_id": "…", "on": true, "opening": 100,
      "temperature": 21.4, "humidity": 52, "occupied": true, "window_open": false, "door_open": false, "guest": false, "sleep": true,
-     "band": {"low": 20.0, "high": 24.0}, "demand": 0,
+     "band": {"low": 20.0, "high": 24.0}, "demand": 0, "weight": 1.0, "priority": "bedroom",
      "entities": {"damper": "cover.master", "power": "switch.master_power"}}
   ],
-  "house": {"period": "day", "band": {"low": 20.0, "high": 24.0}, "indoor": 21.3, "outdoor": 14.5,
+  "house": {"period": "day", "band": {"low": 20.0, "high": 24.0}, "indoor": 21.3, "indoor_basis": "rooms",
+            "deciding_zones": [1, 3, 4], "outdoor": 14.5,
             "anyone_home": true, "demand": 12, "solar_export_w": 2400, "guest_mode": false,
             "sleep_mode": false, "sleep_target": 23.0},
   "forecast": [{"time": "2026-10-25T15:00:00+11:00", "temperature": 18.0, "condition": "sunny"}],
@@ -56,6 +57,7 @@ The subscription survives the integration reloading (for example after a zone is
 
 - `demand` runs from 100 (needs full heating) to the same figure in the cooling direction, sent as a negative number. The card shows it as words or colour, never with a minus sign.
 - `occupied` is `null` when a zone has no presence sensor.
+- `house.indoor` is the weighted average of the rooms with sensors; each zone's `weight` says how much it counts (0 without a sensor). `indoor_basis` is `rooms`, `sleep` (bedtime: the sleep zones), `guest` (guest zones) or `return_air` (no room sensors). `deciding_zones` are the rooms that decide what the house needs.
 - `band` is the comfortable range for that zone right now (period, presence, guest mode and offset applied).
 - Zones carry `paused: true` while a manual change holds autopilot for them.
 - `window_open` is true once a window or door has stayed open past its delay; `door_open` says it is a door.

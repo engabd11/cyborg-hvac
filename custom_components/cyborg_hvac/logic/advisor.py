@@ -18,6 +18,7 @@ from ..core.model import Command, Feature, HvacMode, ZoneCommand
 from .comfort import (
     NEED_MARGIN,
     current_period,
+    deciding_zones,
     house_band,
     house_demand,
     indoor_temperature,
@@ -132,6 +133,33 @@ def rule_unit_health(s: HouseSnapshot) -> Iterable[Recommendation]:
         )
 
 
+def _join(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def describe_rooms(s: HouseSnapshot, warm: bool) -> str:
+    """Name the rooms outside their range, for example "MASTER (24.1 °C) is above 23 °C"."""
+    zones = deciding_zones(s)
+    offenders = [
+        z
+        for z in zones
+        if (zone_error(s, z) < -NEED_MARGIN if warm else zone_error(s, z) > NEED_MARGIN)
+    ]
+    if not offenders:
+        temp = s.unit.current_temp
+        word = "above" if warm else "below"
+        band = house_band(s)
+        return f"The unit reads {fmt(temp)}, {word} {fmt(band.high if warm else band.low)}."
+    edges = {zone_band(s, z).high if warm else zone_band(s, z).low for z in offenders}
+    named = _join([f"{z.name} ({fmt(z.temperature)})" for z in offenders])
+    verb = "is" if len(offenders) == 1 else "are"
+    word = "above" if warm else "below"
+    limit = f" {word} {fmt(edges.pop())}" if len(edges) == 1 else f" {word} their comfort range"
+    rest = len(zones) - len(offenders)
+    tail = " The other rooms are comfortable." if rest > 0 else ""
+    return f"{named} {verb}{limit}.{tail}"
+
+
 # Mode -----------------------------------------------------------------------------
 
 
@@ -150,7 +178,7 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
             "mode",
             Severity.ALERT,
             "Heating while rooms are too warm",
-            f"Rooms are above {fmt(band.high)}. Turn heating off.",
+            f"{describe_rooms(s, warm=True)} Turn heating off.",
             Command(power=False),
         )
         return
@@ -160,7 +188,7 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
             "mode",
             Severity.ALERT,
             "Cooling while rooms are too cold",
-            f"Rooms are below {fmt(band.low)}. Turn cooling off.",
+            f"{describe_rooms(s, warm=False)} Turn cooling off.",
             Command(power=False),
         )
         return
@@ -195,7 +223,7 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
                 "mode",
                 Severity.SUGGEST,
                 "Heating recommended",
-                f"Rooms are below {fmt(band.low)}. Heat to {fmt(target)}.",
+                f"{describe_rooms(s, warm=False)} Heat to {fmt(target)}.",
                 Command(power=True, mode=HvacMode.HEAT, target_temp=target),
             )
     elif not running and need_cool and not need_heat:
@@ -220,7 +248,7 @@ def rule_mode(s: HouseSnapshot) -> Iterable[Recommendation]:
                 "mode",
                 Severity.SUGGEST,
                 "Cooling recommended",
-                f"Rooms are above {fmt(band.high)}. Cool to {fmt(target)}.",
+                f"{describe_rooms(s, warm=True)} Cool to {fmt(target)}.",
                 Command(power=True, mode=HvacMode.COOL, target_temp=target),
             )
 

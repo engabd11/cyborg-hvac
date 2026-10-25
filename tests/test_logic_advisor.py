@@ -229,3 +229,21 @@ def test_naive_forecast_times_work_in_advice():
     )
     s = snap(forecast=naive, outdoor_temp=22.0)
     assert "weather_precool" in ids(s)
+
+
+def test_mode_advice_names_the_rooms():
+    zones = (
+        ZoneInputs(1, "MASTER", True, 100, temperature=24.6),
+        ZoneInputs(2, "HQ", True, 100, temperature=21.0),
+        ZoneInputs(3, "Living Room", True, 100, temperature=22.0),
+    )
+    rec = evaluate(snap(zones, power=True, mode=HvacMode.HEAT))[0]
+    assert rec.id == "mode_heating_warm"
+    assert rec.reason.startswith("MASTER (24.5 °C) is above 24 °C.")
+    assert "The other rooms are comfortable." in rec.reason
+    cold = (
+        ZoneInputs(1, "MASTER", True, 100, temperature=18.0),
+        ZoneInputs(2, "HQ", True, 100, temperature=18.5),
+    )
+    rec = evaluate(snap(cold))[0]
+    assert rec.reason.startswith("MASTER (18 °C) and HQ (18.5 °C) are below 20 °C.")
