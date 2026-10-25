@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - custom_components/cyborg_hvac/manifest.json
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          version=$(python3 -c "import json; print(json.load(open('custom_components/cyborg_hvac/manifest.json'))['version'])")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Release notes are optional: .github/release_notes_vX.Y.Z.md if present,
+      # otherwise GitHub's generated notes.
+      - name: Create release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ steps.version.outputs.version }}"
+          notes_file=".github/release_notes_${tag}.md"
+          if [ -f "$notes_file" ]; then
+            gh release create "$tag" --title "$tag" --notes-file "$notes_file" --target "${{ github.sha }}"
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --target "${{ github.sha }}"
+          fi

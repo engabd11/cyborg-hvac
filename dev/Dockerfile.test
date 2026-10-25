@@ -1,0 +1,7 @@
+# Linux image for the Home Assistant harness tests (they cannot run on Windows).
+#   docker build -t cyborg-hvac-test -f dev/Dockerfile.test dev
+#   docker run --rm -v "$PWD:/repo" cyborg-hvac-test
+FROM python:3.14-slim
+RUN pip install --no-cache-dir pytest-homeassistant-custom-component ruff
+WORKDIR /repo
+CMD ["python", "-m", "pytest", "tests_ha", "-q", "-p", "no:cacheprovider"]

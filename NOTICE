@@ -1,0 +1,19 @@
+Cyborg HVAC
+Copyright (c) 2026 Abdullah (engabd11), MIT licence.
+
+This project adapts code from Hisense's Home Assistant plugin:
+
+  Connectlife-LLC/HomeAssistantPlugin and HomeAssistantPluginIntegration
+  https://github.com/Connectlife-LLC/HomeAssistantPluginIntegration
+  Copyright (c) 2025 Hisense, MIT licence.
+
+  Adapted parts: the request signing and system parameters in
+  backends/hisense_connectlife/client.py, the push channel registration and
+  frame format in backends/hisense_connectlife/push.py, and the published
+  OAuth client details.
+
+Protocol research credit (facts only; no code from these projects is used):
+
+  oyvindwe/connectlife and oyvindwe/connectlife-ha (GPL-3.0), whose device
+  dumps documented the HACZ01 zone properties (aus_zoneN_power,
+  aus_zoneN_opencontrol) and other ConnectLife property names.

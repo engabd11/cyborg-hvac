@@ -1,0 +1,180 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Choose your system",
+        "menu_options": {
+          "hisense_connectlife": "Hisense (ConnectLife app)",
+          "demo": "Demo: simulated ducted unit"
+        }
+      },
+      "hisense_connectlife": {
+        "title": "Sign in to ConnectLife",
+        "description": "Use the account you use in the ConnectLife app. Google, Apple and email sign-in all work.",
+        "menu_options": {
+          "hisense_browser": "Sign in with your browser",
+          "hisense_paste": "Sign in, then paste the address"
+        }
+      },
+      "hisense_paste": {
+        "title": "Paste the sign-in address",
+        "description": "1. Open [this ConnectLife sign-in page]({url}) and sign in.\n2. Your browser then opens an address starting with {redirect}. That page may fail to load, which is fine.\n3. Copy the full address from the address bar and paste it below.",
+        "data": {
+          "redirect_url": "Address after sign-in"
+        }
+      },
+      "demo": {
+        "title": "Demo ducted unit",
+        "description": "A simulated unit with rooms that warm and cool, for trying zones and dashboards without hardware.",
+        "data": {
+          "demo_zones": "Number of zones"
+        }
+      },
+      "zones": {
+        "title": "Zones on {unit}",
+        "description": "The controller has {slots} zone slots. Zones that look installed: {detected}. Enter how many zones your system uses; they are numbered from 1, as in the ConnectLife app.",
+        "data": {
+          "zone_count": "Number of zones"
+        }
+      },
+      "zone_names": {
+        "title": "Name your zones",
+        "description": "Use the same names as the ConnectLife app so they are easy to match. You can rename zones and set their areas later.",
+        "data": {
+          "zone_1": "Zone 1",
+          "zone_2": "Zone 2",
+          "zone_3": "Zone 3",
+          "zone_4": "Zone 4",
+          "zone_5": "Zone 5",
+          "zone_6": "Zone 6",
+          "zone_7": "Zone 7",
+          "zone_8": "Zone 8"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Sign in again",
+        "description": "Your ConnectLife sign-in has expired. Sign in again to keep controlling your system."
+      }
+    },
+    "error": {
+      "invalid_redirect_url": "That address has no sign-in code. Copy the whole address from the browser after signing in.",
+      "oauth_failed": "ConnectLife did not accept the sign-in code. Sign in again and paste the new address straight away."
+    },
+    "abort": {
+      "already_configured": "This account is already set up.",
+      "reauth_successful": "Signed in again. Cyborg HVAC is reconnecting.",
+      "invalid_auth": "ConnectLife rejected the sign-in.",
+      "cannot_connect": "Could not reach ConnectLife. Check your internet connection and try again.",
+      "no_units": "This account has no supported air conditioners.",
+      "account_accept_terms": "ConnectLife needs you to accept updated terms. Open the ConnectLife app, accept them, then try again."
+    }
+  },
+  "config_subentries": {
+    "zone": {
+      "entry_type": "Zone",
+      "initiate_flow": {
+        "user": "Add zone",
+        "reconfigure": "Edit zone"
+      },
+      "step": {
+        "user": {
+          "title": "Add a zone",
+          "data": {
+            "slot": "Zone slot",
+            "name": "Name",
+            "area": "Area"
+          }
+        },
+        "reconfigure": {
+          "title": "Edit zone",
+          "data": {
+            "name": "Name",
+            "area": "Area"
+          }
+        }
+      },
+      "abort": {
+        "no_free_slots": "Every zone slot is already set up, or the integration is still loading."
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "unit": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "auto": "Auto",
+              "silent": "Silent",
+              "low": "Low",
+              "medium_low": "Medium low",
+              "medium": "Medium",
+              "medium_high": "Medium high",
+              "high": "High",
+              "turbo": "Turbo"
+            }
+          },
+          "preset_mode": {
+            "state": {
+              "none": "None",
+              "boost": "Powerful",
+              "eco": "Energy saving",
+              "sleep": "Sleep"
+            }
+          }
+        }
+      }
+    },
+    "switch": {
+      "powerful": { "name": "Powerful" },
+      "eco": { "name": "Energy saving" },
+      "quiet": { "name": "Quiet" },
+      "sleep": { "name": "Sleep" },
+      "frost_guard": { "name": "8 °C heat" },
+      "ai": { "name": "AI mode" },
+      "health": { "name": "Health" },
+      "fresh_air": { "name": "Fresh air" },
+      "display": { "name": "Display" },
+      "beep": { "name": "Beep" },
+      "zone_power": { "name": "Power" }
+    },
+    "select": {
+      "sleep": {
+        "name": "Sleep",
+        "state": {
+          "off": "Off",
+          "general": "General",
+          "for_old": "Older people",
+          "for_young": "Young people",
+          "for_kid": "Children"
+        }
+      }
+    },
+    "number": {
+      "temp_offset": { "name": "Temperature offset" }
+    },
+    "sensor": {
+      "return_air_temperature": { "name": "Return air temperature" }
+    },
+    "binary_sensor": {
+      "filter": { "name": "Filter" },
+      "fault": { "name": "Fault" }
+    }
+  },
+  "exceptions": {
+    "unit_offline": { "message": "The unit is offline." },
+    "feature_unsupported": { "message": "This unit does not have that feature." },
+    "feature_not_available": { "message": "That feature works only while the unit is on in a suitable mode. Powerful needs heating or cooling; 8 °C heat needs heating." },
+    "fan_speed_unsupported": { "message": "This unit does not have that fan speed." },
+    "device_busy": { "message": "The unit refused the change in its current state: {error}" },
+    "auth_failed": { "message": "The sign-in has expired. Sign in again from the integration page." },
+    "command_failed": { "message": "The change could not be sent: {error}" },
+    "account_accept_terms": { "message": "ConnectLife needs you to accept updated terms in the app." }
+  },
+  "issues": {
+    "account_accept_terms": {
+      "title": "Accept the new ConnectLife terms",
+      "description": "ConnectLife has paused access until you accept updated terms. Open the ConnectLife app, accept them, and Cyborg HVAC reconnects on its own."
+    }
+  }
+}

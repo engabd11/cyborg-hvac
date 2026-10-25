@@ -1,0 +1,23 @@
+{
+  "entity": {
+    "switch": {
+      "powerful": { "default": "mdi:rocket-launch" },
+      "eco": { "default": "mdi:leaf" },
+      "quiet": { "default": "mdi:volume-off" },
+      "sleep": { "default": "mdi:power-sleep" },
+      "frost_guard": { "default": "mdi:snowflake-thermometer" },
+      "ai": { "default": "mdi:robot" },
+      "health": { "default": "mdi:shield-plus" },
+      "fresh_air": { "default": "mdi:air-filter" },
+      "display": { "default": "mdi:monitor" },
+      "beep": { "default": "mdi:volume-high" },
+      "zone_power": { "default": "mdi:hvac", "state": { "off": "mdi:hvac-off" } }
+    },
+    "select": {
+      "sleep": { "default": "mdi:power-sleep" }
+    },
+    "number": {
+      "temp_offset": { "default": "mdi:thermometer-plus" }
+    }
+  }
+}
