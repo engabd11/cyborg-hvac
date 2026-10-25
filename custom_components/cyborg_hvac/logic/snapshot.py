@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import UTC, datetime, time
 from enum import StrEnum
 
 from ..core.model import Capabilities, UnitState
@@ -83,6 +83,15 @@ class ForecastPoint:
     temperature: float | None
     humidity: float | None = None
     condition: str | None = None
+
+    def __post_init__(self) -> None:
+        """Treat a forecast time without a time zone as UTC (Home Assistant's convention).
+
+        Some weather integrations (BOM among them) send naive times, which cannot be
+        compared with the aware times everything else uses.
+        """
+        if self.time.tzinfo is None:
+            object.__setattr__(self, "time", self.time.replace(tzinfo=UTC))
 
 
 @dataclass(frozen=True, slots=True)

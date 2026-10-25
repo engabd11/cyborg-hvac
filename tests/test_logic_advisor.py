@@ -220,3 +220,12 @@ def test_guest_mode_ranks_guest_rooms_first():
 def test_guest_mode_without_guest_zones_explains():
     s = snap(power=True, outdoor_temp=10.0, guest_mode=True)
     assert "guest_no_zones" in ids(s)
+
+
+def test_naive_forecast_times_work_in_advice():
+    naive = tuple(
+        ForecastPoint(DAY.replace(tzinfo=None) + timedelta(hours=h), 24.0 + h * 1.2)
+        for h in range(1, 10)
+    )
+    s = snap(forecast=naive, outdoor_temp=22.0)
+    assert "weather_precool" in ids(s)

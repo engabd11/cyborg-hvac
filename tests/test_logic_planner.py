@@ -125,3 +125,13 @@ def test_periods_cover_the_next_day():
     assert result[1]["period"] == "night"
     assert result[1]["band"]["low"] == 18.0
     assert result[-1]["end"] == (T0 + timedelta(hours=24)).isoformat()
+
+
+def test_naive_forecast_times_do_not_crash_the_planner():
+    # BOM sends forecast times without a time zone.
+    naive = tuple(
+        ForecastPoint(T0.replace(tzinfo=None) + timedelta(hours=h), 5.0) for h in range(24)
+    )
+    assert naive[0].time.tzinfo is not None
+    s = snap(18.0, outdoor_temp=6.0, forecast=naive)
+    assert any(b.kind == "preheat" for b in precondition_blocks(s, ThermalModel()))

@@ -476,11 +476,16 @@ class ComfortManager:
             model = self.models.setdefault(unit_id, ThermalModel())
             solar = self.plans.get(unit_id)
             solar_blocks = [b for b in (solar.blocks if solar else []) if b.kind == "solar"]
-            self.plans[unit_id] = Plan(
-                blocks=precondition_blocks(snapshot, model)
-                + [b for b in solar_blocks if b.end > snapshot.now],
-                periods=periods(snapshot),
-            )
+            try:
+                self.plans[unit_id] = Plan(
+                    blocks=precondition_blocks(snapshot, model)
+                    + [b for b in solar_blocks if b.end > snapshot.now],
+                    periods=periods(snapshot),
+                )
+            except Exception:
+                # A bad input must not stop advice and autopilot; plan without it.
+                _LOGGER.exception("Could not build the plan for %s", unit_id)
+                self.plans[unit_id] = Plan()
             self.advice[unit_id] = [
                 rec for rec in evaluate(snapshot) if (unit_id, rec.id) not in self._dismissed
             ]
