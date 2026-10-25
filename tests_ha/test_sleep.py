@@ -79,7 +79,7 @@ async def test_sleep_mode_holds_the_bedroom(hass: HomeAssistant) -> None:
     await hass.services.async_call(
         "switch",
         "turn_on",
-        {"entity_id": "switch.demo_ducted_unit_autopilot_sleep"},
+        {"entity_id": "switch.demo_ducted_unit_autopilot_bedtime"},
         blocking=True,
     )
     await hass.async_block_till_done()

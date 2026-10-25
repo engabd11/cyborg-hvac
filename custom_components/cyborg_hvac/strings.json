@@ -219,7 +219,7 @@
         "name": "Autopilot: solar shifting"
       },
       "sleep_mode": {
-        "name": "Autopilot: sleep"
+        "name": "Autopilot: bedtime"
       }
     },
     "select": {

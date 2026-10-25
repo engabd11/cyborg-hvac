@@ -794,6 +794,13 @@ class ComfortManager:
                     "sleep_target": entity_id("number", f"{unit_id}_sleep_target"),
                     **{b: entity_id("switch", f"{unit_id}_{b}") for b in BEHAVIOURS},
                 },
+                # The unit's own features (Powerful, Eco, Health...) and the entity that
+                # controls each: a switch, or a select for multi-choice features.
+                "features_entities": {
+                    f.value: entity_id("switch", f"{unit_id}_{f.value}")
+                    or entity_id("select", f"{unit_id}_{f.value}")
+                    for f in caps.features
+                },
                 "online": unit.online,
                 "power": unit.power,
                 "mode": unit.mode.value if unit.mode else None,

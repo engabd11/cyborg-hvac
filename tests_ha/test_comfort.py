@@ -156,6 +156,8 @@ async def test_inputs_options_and_websocket(hass: HomeAssistant, hass_ws_client)
     assert event["schema"] == 1
     assert event["unit"]["climate"] == "climate.demo_ducted_unit"
     assert event["unit"]["entities"]["guest_mode"] == "switch.demo_ducted_unit_guest_mode"
+    assert event["unit"]["features_entities"]["powerful"] == "switch.demo_ducted_unit_powerful"
+    assert event["unit"]["features_entities"]["sleep"] == "select.demo_ducted_unit_sleep"
     assert event["unit"]["entities"]["room_balancing"] == (
         "switch.demo_ducted_unit_autopilot_room_balancing"
     )

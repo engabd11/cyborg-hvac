@@ -21,6 +21,7 @@ The subscription survives the integration reloading (for example after a zone is
     "id": "…", "name": "Duct Air Conditioner", "device_id": "…", "climate": "climate.duct_air_conditioner",
     "entities": {"advice": "sensor.duct_air_conditioner_advice", "guest_mode": "switch.duct_air_conditioner_guest_mode",
                  "sleep_mode": "switch.…", "sleep_target": "number.duct_air_conditioner_sleep_temperature",
+    "features_entities": {"powerful": "switch.duct_air_conditioner_powerful", "eco": "switch.…", "health": "switch.…"},
                  "presence_zoning": "switch.…", "room_balancing": "switch.…", "weather_precondition": "switch.…", "solar_shift": "switch.…"},
     "online": true, "power": true, "mode": "heat", "target": 22.0, "current": 21.0, "fan": "auto",
     "features": {"powerful": false, "eco": true, "quiet": false},
