@@ -79,7 +79,7 @@ async def test_sleep_mode_holds_the_bedroom(hass: HomeAssistant) -> None:
     await hass.services.async_call(
         "switch",
         "turn_on",
-        {"entity_id": "switch.demo_ducted_unit_autopilot_bedtime"},
+        {"entity_id": "switch.demo_ducted_unit_bedtime"},
         blocking=True,
     )
     await hass.async_block_till_done()
@@ -110,7 +110,7 @@ async def test_controller_opening_the_spill_zone_is_not_a_manual_change(
     await hass.services.async_call(
         "switch",
         "turn_on",
-        {"entity_id": "switch.demo_ducted_unit_autopilot_room_balancing"},
+        {"entity_id": "switch.demo_ducted_unit_climate_butler"},
         blocking=True,
     )
     system = entry.runtime_data.backend.system
@@ -139,6 +139,8 @@ async def test_bedtime_on_a_cold_night_lets_the_bedroom_cool_instead_of_cooling(
     await configure_zone(hass, entry, "Master", sleep_zone=True)
     await configure_zone(hass, entry, "Dining", spill=True)
     comfort = entry.runtime_data.comfort
+    # What the model has learned about the bedroom: it cools quickly on a cold night.
+    comfort.models["demo_unit"].zone(1).loss = entry.runtime_data.backend.system.zones[1].loss_rate
     system = entry.runtime_data.backend.system
     system.power, system.mode, system.target = True, HvacMode.HEAT, 22.0
     system.zones[1].temperature = 24.0
@@ -155,7 +157,7 @@ async def test_bedtime_on_a_cold_night_lets_the_bedroom_cool_instead_of_cooling(
     await hass.services.async_call(
         "switch",
         "turn_on",
-        {"entity_id": "switch.demo_ducted_unit_autopilot_bedtime"},
+        {"entity_id": "switch.demo_ducted_unit_bedtime"},
         blocking=True,
     )
     await hass.async_block_till_done()

@@ -46,6 +46,10 @@ class ComfortSettings:
     min_open_zones: int = 2
     vacant_close_minutes: int = 30
     short_away_minutes: int = 120
+    # Solar output that counts as plenty (Max energy) even without export, in watts.
+    max_solar_w: float = 6000.0
+    # House battery charge (%) above which the fan keeps air moving while rooms are comfortable.
+    vent_min_battery: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +121,11 @@ class HouseSnapshot:
     away_minutes: float | None = None
     # Power being exported to the grid in watts; None when unknown.
     solar_export_w: float | None = None
+    # Solar output, and battery power (positive while charging), in watts; None when unknown.
+    solar_w: float | None = None
+    battery_w: float | None = None
+    # House battery charge in percent; None when unknown.
+    battery_soc: float | None = None
     period_override: Period | None = None
     guest_mode: bool = False
     sleep_mode: bool = False

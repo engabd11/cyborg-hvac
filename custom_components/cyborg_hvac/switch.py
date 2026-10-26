@@ -8,10 +8,12 @@ from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .comfort_entity import AutopilotSwitch, GuestModeSwitch
-from .comfort_manager import BEHAVIOURS
+from .comfort_manager import BEHAVIOURS, SOLAR_SHIFT
+from .const import DOMAIN
 from .coordinator import CyborgRuntimeData
 from .core.model import Command, Feature, FeatureKind, ZoneCommand
 from .entity import CyborgEntity, CyborgZoneEntity, zone_subentries
@@ -26,6 +28,11 @@ async def async_setup_entry(
 ) -> None:
     """Add feature switches for each unit and a power switch for each zone."""
     coordinator = entry.runtime_data.coordinator
+    # Solar shifting became the Energy select in 0.7.
+    registry = er.async_get(hass)
+    for unit_id in coordinator.units:
+        if old := registry.async_get_entity_id("switch", DOMAIN, f"{unit_id}_{SOLAR_SHIFT}"):
+            registry.async_remove(old)
     async_add_entities(
         FeatureSwitch(coordinator, unit_id, feature)
         for unit_id, info in coordinator.units.items()

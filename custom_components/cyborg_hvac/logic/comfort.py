@@ -34,6 +34,12 @@ def _in_window(now: time, start: time, end: time) -> bool:
     return now >= start or now < end
 
 
+def in_night(snapshot: HouseSnapshot) -> bool:
+    """Return True during the night window, whoever is home."""
+    settings = snapshot.settings
+    return _in_window(snapshot.now.time(), settings.night_start, settings.night_end)
+
+
 def current_period(snapshot: HouseSnapshot) -> Period:
     """Return the period whose targets apply now."""
     if snapshot.period_override is not None:

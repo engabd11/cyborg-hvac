@@ -122,9 +122,13 @@ def test_bedtime_holds_the_bedroom_overnight_on_the_simulation():
         snap_kw={"sleep_mode": True, "sleep_target": 23.0},
     ).run(8 * 60)
     low, high = rig.range_of(1, 3 * 60)
-    assert abs(low - 23.0) <= 0.7, low
-    assert abs(high - 23.0) <= 0.7, high
-    assert rig.writes() <= 20  # under three an hour, mostly half-degree setpoint trims
+    assert abs(low - 23.0) <= 0.6, low
+    assert abs(high - 23.0) <= 0.6, high
+    assert HvacMode.COOL not in rig.modes  # a cold night: easing off, never switching
+    # Holding within half a degree takes a few more writes: one setpoint or damper change
+    # each time the bedroom reaches an edge, about three an hour.
+    assert rig.writes() <= 28
+    assert not rig.budget_hit
     # The other rooms only get a trickle (or nothing): the bedroom gets the air.
     assert all(q.opening <= 50 or not q.on for n, q in sim.zones.items() if n not in (1, 4))
 

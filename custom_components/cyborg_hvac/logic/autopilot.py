@@ -1,21 +1,29 @@
 """One decision for the whole house: mode, setpoint, fan and every damper.
 
-Room balancing and Bedtime hand the unit to this engine. Presence, weather,
-solar and health feed it: they change what each room should reach, not what
-the unit does. The engine then picks the gentlest lever that gets there:
+The Climate Butler (room balancing) and Bedtime hand the unit to this engine.
+Presence, weather, the energy mode and health feed it: they change what each
+room should reach, not what the unit does. The engine then picks the gentlest
+lever that gets there, and watches that it works:
 
-- a room past its aim that outside will bring back is left to coast, its
-  damper closed, rather than switching heating to cooling;
+- a room past its aim that outside will soon bring back is left to coast,
+  its damper closed, rather than switching heating to cooling; the room's own
+  trend is checked, and once it is not getting there in time the unit acts;
 - rooms that differ from each other get different damper openings;
 - the whole house off its aim moves the setpoint;
-- mode and power change only when nothing gentler works.
+- mode and power change only when nothing gentler works;
+- while every room is comfortable and power allows, the fan keeps air moving
+  through the house instead of the unit switching off.
 
 Changes are few and decisive: a damper jumps straight to where it should be
 and stays there for a while, and small corrections are ignored. Everything
 goes out as one command.
 
-Without Room balancing or Bedtime the other switches keep their lighter touch
-(pre-conditioning blocks, solar banking, presence), and health still acts.
+The energy mode (Eco, Mid, Max) sets how close to perfect the rooms are kept
+and how long outside gets to do the work; Bedtime holds the sleep zones within
+half a degree whatever the mode.
+
+Without the Butler or Bedtime the other switches keep their lighter touch
+(pre-conditioning blocks, presence), and health still acts.
 """
 
 from __future__ import annotations
@@ -29,30 +37,31 @@ from typing import Any
 
 from ..core.model import Command, Feature, HvacMode, ZoneCommand
 from .advisor import fmt
-from .balancing import BalanceMemory, smart_setpoint
-from .comfort import Band, deciding_zones, house_band, zone_band, zone_weight
-from .fan import choose_fan
+from .balancing import BIAS_LIMIT, BalanceMemory, smart_setpoint
+from .comfort import (
+    SLEEP_TOLERANCE,
+    Band,
+    current_period,
+    deciding_zones,
+    house_band,
+    in_night,
+    zone_band,
+    zone_weight,
+)
+from .energy import BEDTIME, PROFILES, EnergyMode, Profile
+from .fan import choose_fan, vent_fan
 from .health import ZoneHealth, assess, humidity_of
 from .outlook import Outlook, Season, outdoor_series, outlook as read_outlook
-from .planner import (
-    BANK_DEGREES,
-    SOLAR_START_W,
-    SOLAR_STOP_W,
-    PlanBlock,
-    SolarMemory,
-    precondition_command,
-    solar_block,
-    solar_command,
-)
+from .planner import PlanBlock, precondition_command
 from .presence import PresenceMemory, presence_command
-from .snapshot import HouseSnapshot, ZoneInputs
+from .snapshot import HouseSnapshot, Period, ZoneInputs
 from .thermal import ThermalModel
+from .trend import TrendTracker
 
-# Needs, in degrees short of a room's aim in the running mode.
-NEED_START = 0.5  # a resting unit starts once a room is this far short...
-NEED_NOW = 1.0  # ...straight away this far short, otherwise after START_DELAY
-SERVE_NEED = 0.5  # a room this far short gets more than its holding opening
-FULL_NEED = 1.0  # ...and its full opening this far short
+# Needs, in degrees short of a room's aim in the running mode. When a room starts needing the
+# unit at all is the energy mode's (Profile.act).
+NEED_NOW = 1.0  # a resting unit starts straight away this far short, otherwise after START_DELAY
+FULL_NEED = 1.0  # a room this far short gets its full opening
 SHED_ENTER = 1.5  # degrees past its aim before a room is closed
 SHED_ENTER_SLEEP = 0.5  # bedtime holds the bedroom closer
 SHED_EXIT = 0.3  # a closed room rejoins once this close to where the house is
@@ -69,18 +78,29 @@ MIX_EXIT = -0.25
 MIX_DELAY = timedelta(minutes=10)  # ...for this long, so a setpoint just written does not count
 REST_MARGIN = 1.0  # every room this far past its aim counts as well ahead...
 IDLE_EXIT = 0.3  # ...and an idling unit picks up again once a room is back this close
-SEASON_GATE = 1.5  # extra degrees before the off-season mode is used
+SEASON_GATE = 1.5  # extra degrees to switch away from the last mode while the season is unknown
 
-# Coasting: what outside does to a room left alone, from the thermal model.
-COAST_HORIZON = 120  # minutes outside may take to bring a room back
-COAST_PROGRESS = 0.3  # degrees a coasting room must move per horizon to keep coasting
+# Coasting: what outside does to a room left alone, from the thermal model, checked against
+# what the room really does.
+COAST_MIN = 15  # minutes a coasting room is given at least...
+COAST_SLACK = 1.5  # ...or this many times what the model predicts, up to the profile's horizon
+COAST_CHECK = timedelta(minutes=15)  # after this long the room's own trend must agree
+COAST_CHECK_SLEEP = timedelta(minutes=10)
+COAST_GRACE = timedelta(minutes=10)  # a trend arriving this late after the deadline still counts
+COAST_MOVING = 0.1  # degrees an hour towards its aim before a room counts as moving at all
 OFF_AFTER = 45  # a rest predicted to last this long switches off rather than idles
 LONG_COAST = 120  # rooms comfortable for this long rest even if not well ahead
+# Bedtime acts as soon as the bedroom's trend says it leaves its half degree this soon.
+SLEEP_LOOKAHEAD = timedelta(minutes=15)
+
+# Ventilation: every room comfortable, power to spare, so the fan keeps air moving.
+VENT_EDGE = 0.3  # a room this close to its range's edge, where mixed air pushes it, is closed...
+VENT_REOPEN = 0.6  # ...until it is this far inside again
+VENT_RESUME = 3.0  # battery % above the floor before ventilation starts again
+VENT_SETTLE = timedelta(minutes=10)  # the least time after a mode change before fan-only
 
 # Pacing: few, decisive changes.
 START_DELAY = timedelta(minutes=5)
-CHANGEOVER_DELAY = timedelta(minutes=20)
-MODE_DWELL = timedelta(minutes=60)
 DRY_DWELL = timedelta(minutes=30)
 HUMID_DELAY = timedelta(minutes=15)
 ZONE_DWELL = timedelta(minutes=15)
@@ -107,28 +127,31 @@ HOLD_MAX_STEPS = 3
 DRY_STOP_MARGIN = 5.0  # % humidity below the limit before drying stops
 MAX_HEAT_SETPOINT = 25.5
 MIN_COOL_SETPOINT = 21.5
-HEATWAVE_SPAN = 2.0  # cooling is never set more than this below the band in a heatwave
+HEATWAVE_SPAN = 2.0  # cooling is never set more than this below the band in a heatwave...
+HEATWAVE_SPAN_MAX = 3.0  # ...or this on free power, when comfort comes first
 PEAK_RELAX = 0.5  # the cooling aim eases up to the band edge in a heatwave's hottest hours
+
+HORIZON = max(LONG_COAST, BEDTIME.horizon, *(p.horizon for p in PROFILES.values()))
 
 
 @dataclass(frozen=True, slots=True)
 class Switches:
-    """Which autopilot behaviours are on."""
+    """Which autopilot behaviours are on, and what comfort is worth right now."""
 
     presence: bool = False
     balancing: bool = False
     weather: bool = False
-    solar: bool = False
     sleep: bool = False
+    energy: EnergyMode = EnergyMode.MID
 
     @property
     def any(self) -> bool:
         """Return True when any behaviour is on."""
-        return self.presence or self.balancing or self.weather or self.solar or self.sleep
+        return self.presence or self.balancing or self.weather or self.sleep
 
     @property
     def core(self) -> bool:
-        """Return True when the engine runs the unit (Room balancing or Bedtime)."""
+        """Return True when the engine runs the unit (Climate Butler or Bedtime)."""
         return self.balancing or self.sleep
 
 
@@ -140,6 +163,7 @@ class Role(StrEnum):
     SHED = "shed"  # past its aim: closed until it is back level with the house
     SETBACK = "setback"  # empty, or second while guests or sleepers come first
     MIX = "mix"  # ahead while no room needs the unit: the fan's air evens it out
+    VENT = "vent"  # every room comfortable: open to the fan's air
     KEEPER = "keeper"  # kept open so the fan has enough duct
     SHUT = "shut"  # a window or door is open
     HELD = "held"  # a person's change is being respected
@@ -153,9 +177,37 @@ class Action(StrEnum):
     CHANGE = "change"
     KEEP = "keep"
     IDLE = "idle"
+    VENT = "vent"
     REST = "rest"
     WAIT = "wait"
     LEAVE = "leave"
+
+
+class Activity(StrEnum):
+    """What the house is doing, in one word for the card and history."""
+
+    HEAT = "heat"
+    COOL = "cool"
+    DRY = "dry"
+    VENT = "vent"  # the fan keeps air moving
+    IDLE = "idle"  # running, compressor resting: rooms are past their aim
+    WATCH = "watch"  # waiting on a room: coasting, or a need that may pass
+    REST = "rest"
+    AWAY = "away"
+    HOLD = "hold"  # leaving the unit as it is
+
+
+@dataclass(slots=True)
+class Coast:
+    """A room left for outside to bring back, and when the unit takes over."""
+
+    started: datetime
+    temperature: float
+    mode: HvacMode  # what the room needs: it coasts the other way
+    deadline: datetime
+    # Why it stopped coasting: "trend" (not moving), "deadline" (too slow) or "outside".
+    failed: str | None = None
+    rate: float | None = None  # its trend when it failed, °C an hour
 
 
 @dataclass(slots=True)
@@ -173,8 +225,7 @@ class ZoneMemory:
     # it has been on average since (degrees, positive when behind).
     nudged: datetime | None = None
     behind: float = 0.0
-    # When a room started coasting, its temperature then and which way it should go.
-    coast: tuple[datetime, float, HvacMode] | None = None
+    coast: Coast | None = None
 
 
 @dataclass(slots=True)
@@ -183,20 +234,23 @@ class AutopilotMemory:
 
     zones: dict[int, ZoneMemory] = field(default_factory=dict)
     timers: dict[str, datetime] = field(default_factory=dict)
+    # Any power or mode change, and a switch between heating and cooling.
     mode_at: datetime | None = None
+    mode_changed_at: datetime | None = None
     setpoint_at: datetime | None = None
     fan_at: datetime | None = None
+    # The last heating, cooling or drying mode used (fan-only is not counted).
     last_mode: HvacMode | None = None
     balance: BalanceMemory = field(default_factory=BalanceMemory)
     drying: bool = False
     idling: bool = False
     # True while the unit is satisfied and its fan's air is being sent to rooms that are ahead.
     mixing: bool = False
-    banking: HvacMode | None = None
+    # True while there is power enough to keep the fan moving air (battery above its floor).
+    vent_ok: bool = False
     health_started: bool = False
     # True until the first decision after a behaviour is switched on: act at once.
     fresh: bool = True
-    solar: SolarMemory = field(default_factory=SolarMemory)
     presence: PresenceMemory = field(default_factory=PresenceMemory)
 
     def zone(self, number: int) -> ZoneMemory:
@@ -204,18 +258,54 @@ class AutopilotMemory:
         return self.zones.setdefault(number, ZoneMemory())
 
 
+@dataclass(frozen=True, slots=True)
+class Watch:
+    """A room autopilot is keeping an eye on, and what it expects."""
+
+    zone: int
+    name: str
+    temperature: float
+    aim: float
+    mode: HvacMode  # what the room needs to get there: heat or cool
+    rate: float | None  # °C an hour, rising positive
+    eta: float | None  # minutes to the aim at that rate
+    deadline: datetime | None  # when the unit takes over if it is not there
+    coasting: bool  # left for outside to bring back
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly form for the card."""
+        eta = self.eta if self.eta is not None and math.isfinite(self.eta) else None
+        return {
+            "zone": self.zone,
+            "name": self.name,
+            "temperature": self.temperature,
+            "aim": self.aim,
+            "mode": self.mode.value,
+            "rate": round(self.rate, 2) if self.rate is not None else None,
+            "eta": round(eta) if eta is not None else None,
+            "deadline": self.deadline.isoformat() if self.deadline else None,
+            "coasting": self.coasting,
+        }
+
+
 @dataclass(slots=True)
 class Decision:
     """What autopilot does now, and why."""
 
     command: Command = field(default_factory=Command)
-    # What the house is doing: heat, cool or dry, or None while resting.
+    # What the house is doing: heat, cool, dry or fan_only, or None while resting.
     mode: HvacMode | None = None
     reason: str = ""
     roles: dict[int, Role] = field(default_factory=dict)
     outlook: Outlook = field(default_factory=Outlook)
     health: dict[int, ZoneHealth] = field(default_factory=dict)
-    solar_block: PlanBlock | None = None
+    activity: Activity | None = None
+    # A few words for the card's headline and history ("Cooling Bedroom").
+    headline: str = ""
+    watch: list[Watch] = field(default_factory=list)
+    # The temperature each room is aimed at now.
+    aims: dict[int, float] = field(default_factory=dict)
+    energy: EnergyMode | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly form for the card."""
@@ -223,6 +313,11 @@ class Decision:
             "mode": self.mode.value if self.mode else None,
             "reason": self.reason,
             "roles": {str(n): role.value for n, role in self.roles.items()},
+            "activity": self.activity.value if self.activity else None,
+            "headline": self.headline,
+            "watch": [w.as_dict() for w in self.watch],
+            "aims": {str(n): aim for n, aim in self.aims.items()},
+            "energy": self.energy.value if self.energy else None,
         }
 
 
@@ -231,6 +326,7 @@ class _Choice:
     mode: HvacMode | None
     action: Action
     reason: str
+    headline: str = ""
 
 
 @dataclass(slots=True)
@@ -244,9 +340,13 @@ class _Context:
     paused: set[int]
     minutes: float
     block: PlanBlock | None
-    banking: HvacMode | None
     outdoors: list[float]
     away_off: bool
+    # What rooms aim for (the energy mode), and how the unit is paced (Bedtime or the mode).
+    energy: Profile
+    profile: Profile
+    trend: TrendTracker | None
+    night: bool
 
 
 def decide(
@@ -257,14 +357,21 @@ def decide(
     memory: AutopilotMemory,
     paused: Collection[int] = (),
     minutes: float = 1.0,
+    trend: TrendTracker | None = None,
 ) -> Decision:
-    """Return what autopilot does now, and why."""
+    """Return what autopilot does now, and why.
+
+    ``trend`` holds the rooms' recent readings; without it, coasting rooms are
+    judged on the thermal model and their deadline alone.
+    """
     view = read_outlook(s)
     health = assess(s)
     if not switches.any:
         return Decision(outlook=view, health=health)
     if switches.core:
         settings = s.settings
+        energy = PROFILES[switches.energy]
+        focus = s.sleep_mode and any(z.sleep and z.has_sensor for z in s.zones)
         ctx = _Context(
             s=s,
             switches=switches,
@@ -275,16 +382,21 @@ def decide(
             paused=set(paused),
             minutes=minutes,
             block=_active_block(blocks, s.now) if switches.weather else None,
-            banking=_banking(s, memory) if switches.solar else None,
-            outdoors=outdoor_series(s, s.now + timedelta(minutes=max(COAST_HORIZON, LONG_COAST))),
+            outdoors=outdoor_series(s, s.now + timedelta(minutes=HORIZON)),
             away_off=switches.presence
             and s.anyone_home is False
             and (s.away_minutes or 0) >= settings.short_away_minutes
-            and not (view.heatwave or view.cold_snap),
+            and not (view.heatwave or view.cold_snap)
+            and not energy.everywhere,
+            energy=energy,
+            profile=BEDTIME if focus else energy,
+            trend=trend,
+            night=in_night(s),
         )
         decision = _conduct(ctx)
     else:
         decision = _light(s, switches, list(blocks), view, health, memory)
+    decision.energy = switches.energy
     memory.fresh = False
     return decision
 
@@ -306,10 +418,12 @@ def note_sent(
         memory.fan_at = now
     if command.mode is not None or command.power is not None:
         memory.mode_at = now
-        if command.mode is not None:
-            memory.last_mode = command.mode
-        elif command.power and mode is not None:
-            memory.last_mode = mode
+        new = command.mode if command.mode is not None else (mode if command.power else None)
+        compressor = (HvacMode.HEAT, HvacMode.COOL)
+        if new in compressor and memory.last_mode in compressor and new is not memory.last_mode:
+            memory.mode_changed_at = now
+        if new in (HvacMode.HEAT, HvacMode.COOL, HvacMode.DRY):
+            memory.last_mode = new
 
 
 # The engine -------------------------------------------------------------------------
@@ -322,14 +436,20 @@ def _conduct(ctx: _Context) -> Decision:
     judge = _judge(ctx, choice)
     served_mean = _served_mean(ctx, deciding)
     unit = s.unit
+    venting = choice.action is Action.VENT
     roles = _roles(
-        ctx, judge, {z.zone for z in deciding}, served_mean, _fan_only_now(ctx, choice, judge)
+        ctx,
+        judge,
+        {z.zone for z in deciding},
+        served_mean,
+        _fan_only_now(ctx, choice, judge),
+        venting,
     )
     if choice.mode is HvacMode.DRY:
         for zone in s.sensed_zones:
             if roles[zone.zone] in (Role.HOLD, Role.SHED, Role.SETBACK) and _humid(ctx, zone):
                 roles[zone.zone] = Role.SERVE
-    runs = choice.action in (Action.START, Action.CHANGE) or (
+    runs = choice.action in (Action.START, Action.CHANGE, Action.VENT) or (
         choice.action in (Action.KEEP, Action.IDLE, Action.LEAVE)
         and unit.power
         and unit.mode in (HvacMode.HEAT, HvacMode.COOL, HvacMode.DRY)
@@ -349,15 +469,8 @@ def _conduct(ctx: _Context) -> Decision:
         doing = unit.mode if unit.power else None
     else:
         doing = choice.mode
-    house = house_band(s)
-    block = None
-    if ctx.banking is not None:
-        bank = (
-            min(house.high - 0.5, house.low + 0.5 + BANK_DEGREES)
-            if ctx.banking is HvacMode.HEAT
-            else max(house.low + 0.5, house.high - 0.5 - BANK_DEGREES)
-        )
-        block = solar_block(s, ctx.banking, s.caps.round_temp(bank))
+    watch = _watch(ctx, deciding, judge)
+    activity, headline = _activity(ctx, choice, watch)
     return Decision(
         command=command,
         mode=doing,
@@ -365,7 +478,10 @@ def _conduct(ctx: _Context) -> Decision:
         roles=shown,
         outlook=ctx.view,
         health=ctx.health,
-        solar_block=block,
+        activity=activity,
+        headline=headline,
+        watch=watch,
+        aims={z.zone: round(_aim(ctx, z, judge), 1) for z in s.sensed_zones},
     )
 
 
@@ -403,25 +519,7 @@ def _fan_only_now(ctx: _Context, choice: _Choice, judge: HvacMode) -> bool:
 
 
 def _active_block(blocks: Iterable[PlanBlock], now: datetime) -> PlanBlock | None:
-    return next((b for b in blocks if b.kind != "solar" and b.active(now)), None)
-
-
-def _banking(s: HouseSnapshot, memory: AutopilotMemory) -> HvacMode | None:
-    """Return the mode spare solar is banking comfort in, with start and stop levels."""
-    export = s.solar_export_w or 0.0
-    if memory.banking is not None:
-        if export < SOLAR_STOP_W or s.anyone_home is False:
-            memory.banking = None
-        return memory.banking
-    outdoor = s.outdoor_temp
-    if export < SOLAR_START_W or s.anyone_home is False or outdoor is None:
-        return None
-    band = house_band(s)
-    if outdoor > band.high and HvacMode.COOL in s.caps.hvac_modes:
-        memory.banking = HvacMode.COOL
-    elif outdoor < band.low and HvacMode.HEAT in s.caps.hvac_modes:
-        memory.banking = HvacMode.HEAT
-    return memory.banking
+    return next((b for b in blocks if b.active(now)), None)
 
 
 # What each room should reach ---------------------------------------------------------
@@ -431,9 +529,32 @@ def _opposite(mode: HvacMode) -> HvacMode:
     return HvacMode.COOL if mode is HvacMode.HEAT else HvacMode.HEAT
 
 
+def _sleep_focus(ctx: _Context, zone: ZoneInputs) -> bool:
+    """Return True for a sleep zone while Bedtime holds it within half a degree."""
+    return ctx.s.sleep_mode and zone.sleep
+
+
+def _house_band(ctx: _Context) -> Band:
+    """Return the house band rooms are held to: in Max a lived-in one, even while away."""
+    s = ctx.s
+    period = current_period(s)
+    if ctx.energy.everywhere and period is Period.AWAY:
+        period = Period.NIGHT if ctx.night else Period.DAY
+    return house_band(s, period)
+
+
 def _band(ctx: _Context, zone: ZoneInputs) -> Band:
-    """Return the zone's comfort band, held within healthy limits."""
-    band = zone_band(ctx.s, zone)
+    """Return the zone's comfort band, held within healthy limits.
+
+    In Max every room gets the band of a lived-in room, even empty ones and
+    while everyone is out.
+    """
+    s = ctx.s
+    if ctx.energy.everywhere and not _sleep_focus(ctx, zone):
+        base = _house_band(ctx)
+        band = Band(round(base.low + zone.offset, 1), round(base.high + zone.offset, 1))
+    else:
+        band = zone_band(s, zone)
     health = ctx.health.get(zone.zone)
     if health is None:
         return band
@@ -450,27 +571,41 @@ def _aim(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
     s = ctx.s
     band = _band(ctx, zone)
     heat = mode is HvacMode.HEAT
-    value = band.low + 0.5 if heat else band.high - 0.5
-    if s.secondary(zone) or zone.occupied is False:
+    energy = ctx.energy
+    if _sleep_focus(ctx, zone):
+        return band.low + SLEEP_TOLERANCE if heat else band.high - SLEEP_TOLERANCE
+    if energy.centre:
+        # Within half a degree of the middle: close to perfect, without heating and cooling
+        # taking turns over a tenth of a degree.
+        value = (
+            max(band.low + energy.inset, band.middle - 0.5)
+            if heat
+            else min(band.high - energy.inset, band.middle + 0.5)
+        )
+    else:
+        value = band.low + energy.inset if heat else band.high - energy.inset
+    if not energy.everywhere and (s.secondary(zone) or zone.occupied is False):
         return value
     block = ctx.block
     if block is not None and block.mode is mode:
         value = max(value, block.target) if heat else min(value, block.target)
-    if ctx.banking is mode:
-        value = (
-            min(band.high - 0.5, value + BANK_DEGREES)
-            if heat
-            else max(band.low + 0.5, value - BANK_DEGREES)
-        )
-    elif ctx.view.peak and not heat:
+    elif ctx.view.peak and not heat and not energy.everywhere:
         value = min(band.high, value + PEAK_RELAX)
     return value
 
 
-def _wants(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
-    """Return True while a room needs ``mode``: once short enough, until it reaches its aim."""
-    need = _need(ctx, zone, mode)
-    return need >= SERVE_NEED or (ctx.memory.zone(zone.zone).role is Role.SERVE and need > 0)
+def _act(ctx: _Context, zone: ZoneInputs) -> float:
+    """Return degrees past its aim before a room needs the unit."""
+    return BEDTIME.act if _sleep_focus(ctx, zone) else ctx.energy.act
+
+
+def _act_against(ctx: _Context, zone: ZoneInputs) -> float:
+    """Return degrees past its aim before a room needs the opposite of what is running.
+
+    A bedroom at Bedtime is let use its whole half degree first: easing off is
+    gentler than switching.
+    """
+    return SLEEP_TOLERANCE if _sleep_focus(ctx, zone) else _act(ctx, zone)
 
 
 def _need(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
@@ -478,6 +613,35 @@ def _need(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
     assert zone.temperature is not None
     target = _aim(ctx, zone, mode)
     return target - zone.temperature if mode is HvacMode.HEAT else zone.temperature - target
+
+
+def _short(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
+    """Return how short a room counts as in ``mode`` when deciding to act.
+
+    A bedroom at Bedtime counts as needing the unit as soon as its trend says
+    it will leave its half degree within SLEEP_LOOKAHEAD, so it never gets there.
+    """
+    need = _need(ctx, zone, mode)
+    if not _sleep_focus(ctx, zone) or ctx.trend is None:
+        return need
+    unit = ctx.s.unit
+    if unit.power and unit.mode is _opposite(mode):
+        return need  # the unit is causing that trend, and easing off undoes it
+    rate = ctx.trend.rate(zone.zone)
+    if rate is None:
+        return need
+    growing = rate if mode is HvacMode.COOL else -rate  # °C an hour away from the aim
+    ahead = need + growing * SLEEP_LOOKAHEAD.total_seconds() / 3600
+    if growing > 0 and ahead >= SLEEP_TOLERANCE:
+        return max(need, SLEEP_TOLERANCE)
+    return need
+
+
+def _wants(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
+    """Return True while a room needs ``mode``: once short enough, until it reaches its aim."""
+    return _short(ctx, zone, mode) >= _act(ctx, zone) or (
+        ctx.memory.zone(zone.zone).role is Role.SERVE and _need(ctx, zone, mode) > 0
+    )
 
 
 def _critical(ctx: _Context, zone: ZoneInputs) -> bool:
@@ -491,9 +655,17 @@ def _humid(ctx: _Context, zone: ZoneInputs) -> bool:
 
 
 def _deciding(ctx: _Context) -> list[ZoneInputs]:
-    """Return the rooms that decide what the unit does, health cases included."""
+    """Return the rooms that decide what the unit does, health cases included.
+
+    In Max every room decides, unless Bedtime puts the bedroom first.
+    """
     s = ctx.s
-    base = [] if ctx.away_off else deciding_zones(s)
+    if ctx.away_off:
+        base: list[ZoneInputs] = []
+    elif ctx.energy.everywhere and not s.sleep_mode:
+        base = list(s.sensed_zones)
+    else:
+        base = deciding_zones(s)
     ids = {z.zone for z in base}
     base += [z for z in s.sensed_zones if z.zone not in ids and _critical(ctx, z)]
     return [z for z in base if not z.window_open and z.zone not in ctx.paused]
@@ -514,42 +686,86 @@ def _drift(ctx: _Context, zone: ZoneInputs, target: float) -> float | None:
         zone.temperature,  # type: ignore[arg-type]
         target,
         ctx.outdoors,
+        ctx.night,
     )
     return math.inf if minutes is None else float(minutes)
 
 
-def _coastable(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
-    """Return True when outside brings a room that needs ``mode`` back to its aim on its own.
+def _coast_target(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
+    """Return where a coasting room must get to.
 
-    The prediction is checked against what happens: a room that has not moved
-    after a full horizon (sun, people, a heater) no longer counts as coasting.
+    Its aim; a bedroom at Bedtime only back to where it stops needing the unit,
+    which is already well inside its half degree.
     """
-    minutes = _drift(ctx, zone, _aim(ctx, zone, mode))
-    if minutes is None or minutes > COAST_HORIZON:
-        return False
+    aim = _aim(ctx, zone, mode)
+    if _sleep_focus(ctx, zone):
+        act = _act(ctx, zone)
+        return aim - act if mode is HvacMode.HEAT else aim + act
+    return aim
+
+
+def _coastable(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
+    """Return True while outside is bringing a room that needs ``mode`` back on its own.
+
+    The model has to say it gets there within the horizon. The room then gets a
+    fixed deadline, and once it has been watched for a while its own trend has
+    to agree: a room that is not moving, or too slowly, is handed to the unit.
+    That stays so until the room no longer needs ``mode``.
+    """
     memory = ctx.memory.zone(zone.zone)
     now, temp = ctx.s.now, zone.temperature
     assert temp is not None
-    if memory.coast is None or memory.coast[2] is not mode:
-        memory.coast = (now, temp, mode)
+    coast = memory.coast
+    if coast is not None and coast.mode is mode and coast.failed:
+        return False
+    sleep = _sleep_focus(ctx, zone)
+    horizon = BEDTIME.horizon if sleep else ctx.energy.horizon
+    target = _coast_target(ctx, zone, mode)
+    if (temp >= target) if mode is HvacMode.HEAT else (temp <= target):
+        # Already there, so only a trend heading out (a bedroom about to leave its half
+        # degree) can make it need the unit: outside is not bringing that back.
+        rate = ctx.trend.rate(zone.zone) if ctx.trend is not None else None
+        leaving = rate is not None and (-rate if mode is HvacMode.HEAT else rate) > COAST_MOVING
+        return not leaving
+    minutes = _drift(ctx, zone, target)
+    if minutes is None or minutes > horizon:
+        if coast is not None and coast.mode is mode:
+            coast.failed = "outside"
+        return False
+    if coast is None or coast.mode is not mode:
+        span = min(float(horizon), max(COAST_MIN, minutes * COAST_SLACK))
+        memory.coast = Coast(now, temp, mode, now + timedelta(minutes=span))
         return True
-    started, start_temp, _ = memory.coast
-    if now - started >= timedelta(minutes=COAST_HORIZON):
-        progress = temp - start_temp if mode is HvacMode.HEAT else start_temp - temp
-        if progress < COAST_PROGRESS:
+    if now >= coast.deadline:
+        coast.failed = "deadline"
+        return False
+    check = COAST_CHECK_SLEEP if sleep else COAST_CHECK
+    rate = ctx.trend.rate(zone.zone) if ctx.trend is not None else None
+    if rate is not None and now - coast.started >= check:
+        toward = rate if mode is HvacMode.HEAT else -rate
+        left = abs(temp - target)
+        if toward < COAST_MOVING or now + timedelta(hours=left / toward) > (
+            coast.deadline + COAST_GRACE
+        ):
+            coast.failed, coast.rate = "trend", rate
             return False
-        memory.coast = (now, temp, mode)
     return True
+
+
+def _coast_failed(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
+    coast = ctx.memory.zone(zone.zone).coast
+    return coast is not None and coast.mode is mode and coast.failed is not None
 
 
 def _coast_time(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> float | None:
     """Return minutes until any room needs ``mode`` again, or None when unknown."""
     times = []
     for zone in zones:
-        if _need(ctx, zone, mode) >= SERVE_NEED:
+        act = _act(ctx, zone)
+        if _short(ctx, zone, mode) >= act:
             return 0.0
         target = _aim(ctx, zone, mode)
-        edge = target - SERVE_NEED if mode is HvacMode.HEAT else target + SERVE_NEED
+        edge = target - act if mode is HvacMode.HEAT else target + act
         minutes = _drift(ctx, zone, edge)
         if minutes is None:
             return None
@@ -558,6 +774,7 @@ def _coast_time(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> float
 
 
 def _forget_coasts(ctx: _Context, keep: Iterable[ZoneInputs]) -> None:
+    """Forget coasting for rooms that no longer need the other mode."""
     ids = {z.zone for z in keep}
     for number, memory in ctx.memory.zones.items():
         if number not in ids:
@@ -582,19 +799,28 @@ def _dwelt(memory: AutopilotMemory, now: datetime, dwell: timedelta) -> bool:
     return memory.mode_at is None or now - memory.mode_at >= dwell
 
 
+def _flip_allowed(memory: AutopilotMemory, now: datetime, dwell: timedelta) -> bool:
+    """Return True once the last switch between heating and cooling is ``dwell`` ago."""
+    return memory.mode_changed_at is None or now - memory.mode_changed_at >= dwell
+
+
 def _gate(ctx: _Context, mode: HvacMode, last: HvacMode | None) -> float:
     """Return extra degrees ``mode`` needs because the season is against it.
 
-    Without any outdoor reading the season is unknown, so only a switch away
-    from the mode last used (``last``) has to clear the extra margin.
+    The energy mode sets how much (none at Bedtime). Without any outdoor reading
+    the season is unknown, so only a switch away from the mode last used
+    (``last``) has to clear the extra margin.
     """
+    gate = ctx.profile.gate
+    if not gate:
+        return 0.0
     view = ctx.view
     if not view.known:
         return SEASON_GATE if last is not None and mode is not last else 0.0
     against = (mode is HvacMode.COOL and view.season is Season.HEATING) or (
         mode is HvacMode.HEAT and view.season is Season.COOLING
     )
-    return SEASON_GATE if against else 0.0
+    return gate if against else 0.0
 
 
 def _season_mode(ctx: _Context, zones: list[ZoneInputs]) -> HvacMode:
@@ -607,7 +833,7 @@ def _season_mode(ctx: _Context, zones: list[ZoneInputs]) -> HvacMode:
     if heat != cool:
         return HvacMode.HEAT if heat > cool else HvacMode.COOL
     outdoor = ctx.s.outdoor_temp
-    warm = outdoor is not None and outdoor > house_band(ctx.s).middle
+    warm = outdoor is not None and outdoor > _house_band(ctx).middle
     return HvacMode.COOL if warm else HvacMode.HEAT
 
 
@@ -617,9 +843,14 @@ def _choose(ctx: _Context, deciding: list[ZoneInputs]) -> _Choice:
     running = unit.mode if unit.power else None
     if ctx.away_off and not deciding:
         minutes = int(s.away_minutes or 0)
-        return _Choice(None, Action.REST, f"Everyone has been out for {minutes} minutes: resting.")
+        return _Choice(
+            None,
+            Action.REST,
+            f"Everyone has been out for {minutes} minutes: resting.",
+            "Away: resting",
+        )
     if not deciding:
-        return _Choice(running, Action.LEAVE, _unsensed_reason(ctx))
+        return _Choice(running, Action.LEAVE, _unsensed_reason(ctx), "Leaving the unit as it is")
     drying = _drying(ctx, deciding, running)
     if drying is not None:
         return drying
@@ -628,91 +859,151 @@ def _choose(ctx: _Context, deciding: list[ZoneInputs]) -> _Choice:
         choice = _while_running(ctx, deciding, pick)
         if choice.action in (Action.KEEP, Action.IDLE):
             return _Choice(
-                pick, Action.CHANGE, f"{_verb(pick)} instead of auto. {choice.reason}".strip()
+                pick,
+                Action.CHANGE,
+                f"{_verb(pick)} instead of auto. {choice.reason}".strip(),
+                f"{_verb(pick)} instead of auto",
             )
         return choice
     if running in (HvacMode.HEAT, HvacMode.COOL):
         return _while_running(ctx, deciding, running)
+    # Off, fan-only or drying that is no longer needed: start what is needed, or rest.
     return _from_rest(ctx, deciding, running)
 
 
 def _while_running(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> _Choice:
-    s, memory = ctx.s, ctx.memory
+    s, memory, profile = ctx.s, ctx.memory, ctx.profile
     other = _opposite(mode)
     want = [z for z in zones if _wants(ctx, z, mode)]
-    wrong = [z for z in zones if _need(ctx, z, other) >= NEED_START]
+    wrong = [z for z in zones if _short(ctx, z, other) >= _act_against(ctx, z)]
     _forget_coasts(ctx, wrong)
     stuck = [z for z in wrong if not _coastable(ctx, z, other)]
     gate = _gate(ctx, other, mode)
-    strong = [z for z in stuck if _need(ctx, z, other) >= NEED_START + gate]
+    strong = [z for z in stuck if _short(ctx, z, other) >= _act_against(ctx, z) + gate]
     switch = not want and bool(strong) and other in s.caps.hvac_modes
-    if _sustained(memory, "changeover", switch, s.now, CHANGEOVER_DELAY) and _dwelt(
-        memory, s.now, MODE_DWELL
-    ):
+    settled = _sustained(memory, "changeover", switch, s.now, profile.changeover)
+    # A room that was watched and did not come back on its own has already waited.
+    proven = switch and any(_coast_failed(ctx, z, other) for z in strong)
+    if (settled or proven) and _flip_allowed(memory, s.now, profile.dwell):
         return _Choice(
             other,
             Action.CHANGE,
             f"Switching to {_word(other)}: {_rooms(strong)} "
             f"{'has' if len(strong) == 1 else 'have'} stayed "
-            f"{'warm' if other is HvacMode.COOL else 'cold'} and outside will not fix it.",
+            f"{'warm' if other is HvacMode.COOL else 'cold'}.{_because(ctx, strong, other)}",
+            f"Switching to {_word(other)} for {_names(strong)}",
         )
     note = _coast_note(ctx, [z for z in wrong if z not in stuck], other)
     if want:
         memory.idling = False
-        return _Choice(mode, Action.KEEP, f"{_verb(mode)} {_rooms(want)}.{note}")
+        reason = f"{_verb(mode)} {_rooms(want)}.{note}"
+        return _Choice(mode, Action.KEEP, reason, f"{_verb(mode)} {_names(want)}")
     coast = _coast_time(ctx, zones, mode)
     margin = IDLE_EXIT if memory.idling else REST_MARGIN
     deep = all(_need(ctx, z, mode) <= -margin for z in zones)
     memory.idling = deep
     if coast is not None and (coast >= LONG_COAST or (deep and coast >= OFF_AFTER)):
-        return _Choice(None, Action.REST, _rest_reason(coast) + note)
+        if not _vent_ok(ctx):
+            return _Choice(None, Action.REST, f"Resting: {_stay_reason(coast)}{note}", "Resting")
+        if _dwelt(memory, s.now, VENT_SETTLE):
+            return _vent(f"{_stay_reason(coast).capitalize()}{note}")
     if deep:
-        return _Choice(mode, Action.IDLE, f"Rooms are past their aim: idling.{note}")
-    return _Choice(mode, Action.KEEP, f"Holding rooms at their aim.{note}")
+        return _Choice(
+            mode, Action.IDLE, f"Rooms are past their aim: idling.{note}", "Idling: rooms are ahead"
+        )
+    return _Choice(mode, Action.KEEP, f"Holding rooms at their aim.{note}", "Holding rooms steady")
 
 
 def _from_rest(ctx: _Context, zones: list[ZoneInputs], running: HvacMode | None) -> _Choice:
-    s, memory = ctx.s, ctx.memory
+    s, memory, profile = ctx.s, ctx.memory, ctx.profile
     options: list[tuple[HvacMode, list[ZoneInputs]]] = []
     coasting: list[tuple[ZoneInputs, HvacMode]] = []
+    needing_any: list[ZoneInputs] = []
     for mode in (HvacMode.HEAT, HvacMode.COOL):
         if mode not in s.caps.hvac_modes:
             continue
         gate = _gate(ctx, mode, memory.last_mode)
-        needing = [z for z in zones if _need(ctx, z, mode) >= NEED_START + gate]
+        needing = [z for z in zones if _short(ctx, z, mode) >= _act(ctx, z) + gate]
+        needing_any += needing
         stuck = [z for z in needing if not _coastable(ctx, z, mode)]
         coasting += [(z, mode) for z in needing if z not in stuck]
         if stuck:
             options.append((mode, stuck))
-    _forget_coasts(ctx, [z for z, _ in coasting])
+    # Rooms still needing a mode keep their coasting record, failed or not: a failed coast
+    # must not start afresh next minute.
+    _forget_coasts(ctx, needing_any)
     if not options:
         memory.timers.pop("start_heat", None)
         memory.timers.pop("start_cool", None)
         note = "".join(_coast_note(ctx, [z], mode) for z, mode in coasting)
-        if running is HvacMode.DRY and memory.last_mode is HvacMode.DRY:
-            return _Choice(None, Action.REST, "Dry enough: resting." + note)
-        if running is None:
-            return _Choice(None, Action.REST, ("Rooms are comfortable." + note).strip())
-        return _Choice(running, Action.LEAVE, note.strip())
+        dry = running is HvacMode.DRY and memory.last_mode is HvacMode.DRY
+        reason = ("Dry enough." if dry else "Rooms are comfortable.") + note
+        if _vent_ok(ctx):
+            return _vent(reason)
+        return _Choice(None, Action.REST, reason, "Resting")
     if len(options) == 2:
         preferred = _season_mode(ctx, zones)
         mode, stuck = next(o for o in options if o[0] is preferred)
     else:
         mode, stuck = options[0]
     memory.timers.pop(f"start_{_opposite(mode).value}", None)
-    biggest = max(_need(ctx, z, mode) for z in stuck)
+    biggest = max(_short(ctx, z, mode) for z in stuck)
     ready = _sustained(memory, f"start_{mode.value}", True, s.now, START_DELAY)
-    switching = memory.last_mode not in (None, mode) and not _dwelt(memory, s.now, MODE_DWELL)
+    switching = memory.last_mode not in (None, mode) and not _flip_allowed(
+        memory, s.now, profile.dwell
+    )
     block = ctx.block is not None and ctx.block.mode is mode
-    if not switching and (memory.fresh or biggest >= NEED_NOW or ready or block):
-        return _Choice(mode, Action.START, f"{_verb(mode)} {_rooms(stuck)}.")
+    # A room that was watched and did not get there, or a bedroom, is not kept waiting.
+    proven = any(_coast_failed(ctx, z, mode) or _sleep_focus(ctx, z) for z in stuck)
+    if not switching and (memory.fresh or biggest >= NEED_NOW or ready or block or proven):
+        return _Choice(
+            mode,
+            Action.START,
+            f"{_verb(mode)} {_rooms(stuck)}.{_because(ctx, stuck, mode)}",
+            f"{_verb(mode)} {_names(stuck)}",
+        )
     word = "cool" if mode is HvacMode.HEAT else "warm"
     verb = "is" if len(stuck) == 1 else "are"
+    if switching and memory.mode_changed_at is not None:
+        at = memory.mode_changed_at + profile.dwell
+        later = f"{_word(mode)} starts at {at:%H:%M} (the unit changed mode recently)"
+    else:
+        later = f"{_word(mode)} starts if it stays that way"
     return _Choice(
         running,
         Action.WAIT,
-        f"{_rooms(stuck)} {verb} a little {word}: {_word(mode)} starts if it stays that way.",
+        f"{_rooms(stuck)} {verb} a little {word}: {later}.",
+        f"Watching {_names(stuck)}",
     )
+
+
+def _vent(reason: str) -> _Choice:
+    return _Choice(
+        HvacMode.FAN_ONLY,
+        Action.VENT,
+        f"{reason} Keeping air moving through the house.".strip(),
+        "Keeping air moving",
+    )
+
+
+def _vent_ok(ctx: _Context) -> bool:
+    """Return True while the fan may keep air moving through a comfortable house.
+
+    With a house battery, while it is above its floor (with a little margin
+    before starting again); without one, only while power is free (Max).
+    """
+    s, memory = ctx.s, ctx.memory
+    if HvacMode.FAN_ONLY not in s.caps.hvac_modes or memory.drying:
+        return False
+    if ctx.away_off or (s.anyone_home is False and not ctx.energy.everywhere):
+        return False
+    soc = s.battery_soc
+    if soc is None:
+        memory.vent_ok = ctx.energy.mode is EnergyMode.MAX
+    else:
+        floor = s.settings.vent_min_battery
+        memory.vent_ok = soc > (floor if memory.vent_ok else floor + VENT_RESUME)
+    return memory.vent_ok
 
 
 def _drying(ctx: _Context, zones: list[ZoneInputs], running: HvacMode | None) -> _Choice | None:
@@ -736,17 +1027,22 @@ def _drying(ctx: _Context, zones: list[ZoneInputs], running: HvacMode | None) ->
         not memory.drying
         or ctx.view.season is Season.HEATING
         or HvacMode.DRY not in modes
-        or any(_need(ctx, z, HvacMode.HEAT) >= SERVE_NEED for z in zones)
+        or any(_short(ctx, z, HvacMode.HEAT) >= _act(ctx, z) for z in zones)
         # Rooms that need cooling are cooled with a slow fan, which dries them too.
-        or any(_need(ctx, z, HvacMode.COOL) >= SERVE_NEED for z in zones)
+        or any(_short(ctx, z, HvacMode.COOL) >= _act(ctx, z) for z in zones)
     ):
         return None
     reason = f"Drying: {wettest.name} is at {top:.0f}% humidity."
     if running is HvacMode.DRY:
-        return _Choice(HvacMode.DRY, Action.KEEP, reason)
+        return _Choice(HvacMode.DRY, Action.KEEP, reason, "Drying the air")
     if running in (HvacMode.HEAT, HvacMode.COOL) and not _dwelt(memory, s.now, DRY_DWELL):
         return None
-    return _Choice(HvacMode.DRY, Action.START if not s.unit.power else Action.CHANGE, reason)
+    return _Choice(
+        HvacMode.DRY,
+        Action.START if not s.unit.power else Action.CHANGE,
+        reason,
+        "Drying the air",
+    )
 
 
 def _judge(ctx: _Context, choice: _Choice) -> HvacMode:
@@ -785,6 +1081,7 @@ def _roles(
     deciding: set[int],
     served_mean: float | None,
     idling: bool = False,
+    venting: bool = False,
 ) -> dict[int, Role]:
     s, memory = ctx.s, ctx.memory
     needing = {z.zone for z in s.sensed_zones if z.zone in deciding and _wants(ctx, z, judge)}
@@ -793,6 +1090,8 @@ def _roles(
     mean_need = (
         sum(_need(ctx, z, judge) for z in primary) / len(primary) if len(primary) > 1 else None
     )
+    sensed = s.sensed_zones
+    mixed = sum(z.temperature for z in sensed) / len(sensed) if sensed else None  # type: ignore[misc]
     roles: dict[int, Role] = {}
     for zone in s.zones:
         zm = memory.zone(zone.zone)
@@ -800,6 +1099,8 @@ def _roles(
             role = Role.HELD
         elif zone.window_open:
             role = Role.SHUT
+        elif venting:
+            role = _vent_role(ctx, zone, zm, mixed) if zone.has_sensor else Role.VENT
         elif not zone.has_sensor:
             role = _unsensed_role(ctx, zone)
         else:
@@ -815,9 +1116,26 @@ def _roles(
     return roles
 
 
+def _vent_role(ctx: _Context, zone: ZoneInputs, zm: ZoneMemory, mixed: float | None) -> Role:
+    """Return VENT, or SHED for a room the house's mixed air would push out of its range."""
+    temp = zone.temperature
+    if mixed is None or temp is None:
+        return Role.VENT
+    band = _band(ctx, zone)
+    if mixed < temp:
+        room = temp - band.low
+    elif mixed > temp:
+        room = band.high - temp
+    else:
+        return Role.VENT
+    limit = VENT_REOPEN if zm.role is Role.SHED else VENT_EDGE
+    return Role.SHED if room <= limit else Role.VENT
+
+
 def _vacant(ctx: _Context, zone: ZoneInputs) -> bool:
     return (
         ctx.switches.presence
+        and not ctx.energy.everywhere
         and zone.occupied is False
         and (zone.vacant_minutes or 0) >= ctx.s.settings.vacant_close_minutes
     )
@@ -835,8 +1153,14 @@ def _unsensed_role(ctx: _Context, zone: ZoneInputs) -> Role:
 
 
 def _second(ctx: _Context, zone: ZoneInputs, deciding: bool) -> bool:
-    """Return True for a room that only has to stay tolerable (empty, or not first)."""
-    return _vacant(ctx, zone) or ctx.s.secondary(zone) or not deciding
+    """Return True for a room that only has to stay tolerable (empty, or not first).
+
+    In Max only Bedtime puts a room second: every other room counts in full.
+    """
+    s = ctx.s
+    if ctx.energy.everywhere:
+        return (s.sleep_mode and not zone.sleep) or not deciding
+    return _vacant(ctx, zone) or s.secondary(zone) or not deciding
 
 
 def _sensed_role(
@@ -858,19 +1182,30 @@ def _sensed_role(
     """
     s = ctx.s
     need = _need(ctx, zone, judge)
+    act = _act(ctx, zone)
     if _second(ctx, zone, deciding) and not _critical(ctx, zone):
         if zm.role in (Role.SERVE, Role.HOLD):
             return Role.SERVE if need > -SECOND_EXIT else Role.SETBACK
-        return Role.SERVE if need >= SERVE_NEED else Role.SETBACK
+        return Role.SERVE if need >= act else Role.SETBACK
     if mixing and (need <= -MIX_AHEAD or (zm.role is Role.MIX and need <= -MIX_AHEAD + MIX_CLEAR)):
         return Role.MIX
+    coast = zm.coast
+    if coast is not None and coast.mode is not judge and not coast.failed:
+        # Left for outside to bring back while the unit serves others, or with a change of
+        # mode riding on it: none of the unit's air meanwhile, so its trend shows what the
+        # room really does.
+        decisive = _short(ctx, zone, coast.mode) >= _act_against(ctx, zone) + _gate(
+            ctx, coast.mode, judge
+        )
+        if others or decisive:
+            return Role.SHED
     enter = SHED_ENTER_SLEEP if s.sleep_mode and zone.sleep else SHED_ENTER
     if zm.role is Role.SHED:
         if not _back_with_house(ctx, zone, judge, deciding, served_mean, enter):
             return Role.SHED
     elif need <= -enter and others:
         return Role.SHED
-    if need >= SERVE_NEED or (zm.role is Role.SERVE and need > 0):
+    if _short(ctx, zone, judge) >= act or (zm.role is Role.SERVE and need > 0):
         return Role.SERVE
     return Role.HOLD
 
@@ -1010,7 +1345,7 @@ def _targets(
             targets[zone.zone] = (False, zone.opening)
         elif role in (Role.SHED, Role.SETBACK):
             targets[zone.zone] = _closed(ctx, zone)
-        elif role is Role.MIX:
+        elif role in (Role.MIX, Role.VENT):
             targets[zone.zone] = (True, _level(ctx, zone, high))
         elif not zone.has_sensor:
             reopen = not s.sleep_mode and zone.opening > 0
@@ -1114,18 +1449,20 @@ def _keep_airflow(
 
 
 _CLOSED_ROLES = (Role.SHED, Role.SETBACK, Role.SHUT)
+_AIRING_ROLES = (Role.MIX, Role.VENT)
 
 
 def _flipped(before: Role | None, after: Role | None) -> bool:
-    """Return True when a role change opens or closes a zone, or starts or ends mixing.
+    """Return True when a role change opens or closes a zone, or starts or ends airing.
 
-    Mixing ends the moment the unit works again, so those rooms must not wait out
-    the dwell with the fan's air (now warm or cool) still going to them.
+    Airing (mixing or ventilating) ends the moment the unit works again, so those
+    rooms must not wait out the dwell with the fan's air (now warm or cool) still
+    going to them.
     """
     return (
         before is None
         or (before in _CLOSED_ROLES) != (after in _CLOSED_ROLES)
-        or (before is Role.MIX) != (after is Role.MIX)
+        or (before in _AIRING_ROLES) != (after in _AIRING_ROLES)
     )
 
 
@@ -1206,6 +1543,14 @@ def _unit_command(
         return Command()
     if action is Action.LEAVE:
         return Command(target_temp=_unsensed_setpoint(ctx), zones=zones)
+    if action is Action.VENT:
+        start = not unit.power or unit.mode is not HvacMode.FAN_ONLY
+        return Command(
+            power=True if not unit.power else None,
+            mode=HvacMode.FAN_ONLY if start else None,
+            fan_speed=_vent_speed(ctx, start),
+            zones=zones,
+        )
     force = action in (Action.START, Action.CHANGE)
     if force:
         memory.balance = BalanceMemory()
@@ -1248,13 +1593,26 @@ def _setpoint(
             if heat
             else (max(edge, edge + bias) + IDLE_OFFSET)
         )
+        # Keep learning while idle how far past their aim the rooms went, so the next
+        # hold starts from a setpoint that does not overshoot again.
+        rooms = [z for z in deciding if z.has_sensor]
+        if rooms:
+            smart_setpoint(
+                s,
+                rooms,
+                mode,
+                memory.balance,
+                ctx.minutes,
+                {z.zone: _aim(ctx, z, mode) for z in rooms},
+                rounded=False,
+            )
     else:
         value = smart_setpoint(  # type: ignore[assignment]
             s, served, mode, memory.balance, ctx.minutes, aims, rounded=False
         )
         if value is None:
             value = max(aims.values()) if heat else min(aims.values())
-    raw = _limit(ctx, mode, value, aims)
+    raw = _limit(ctx, mode, value, aims, _return_bias(ctx, served or deciding))
     value = s.caps.round_temp(raw)
     current = unit.target_temp
     if current is None or force:
@@ -1287,14 +1645,25 @@ def _return_bias(ctx: _Context, zones: list[ZoneInputs]) -> float:
     return returned - rooms
 
 
-def _limit(ctx: _Context, mode: HvacMode, value: float, aims: dict[int, float]) -> float:
-    """Keep the setpoint where it helps: never far past the rooms, gentle in a heatwave."""
+def _limit(
+    ctx: _Context, mode: HvacMode, value: float, aims: dict[int, float], bias: float
+) -> float:
+    """Keep the setpoint where it helps: never far past the rooms, gentle in a heatwave.
+
+    The limits are for the rooms, so they move with ``bias`` (return air minus the
+    rooms): cooling one warm bedroom while the rest of the house is cold, the unit
+    reads cold return air and must be set lower than the bedroom's aim to cool it.
+    """
+    bias = max(-BIAS_LIMIT, min(BIAS_LIMIT, bias))
     if mode is HvacMode.HEAT:
-        return min(value, max(MAX_HEAT_SETPOINT, max(aims.values()) + 0.5))
-    value = max(value, min(MIN_COOL_SETPOINT, min(aims.values()) - 0.5))
+        return min(value, max(MAX_HEAT_SETPOINT, max(aims.values()) + 0.5) + max(0.0, bias))
+    colder = min(0.0, bias)
+    value = max(value, min(MIN_COOL_SETPOINT, min(aims.values()) - 0.5) + colder)
     if ctx.view.heatwave:
         # Below this the unit only runs flat out longer and overshoots once the heat breaks.
-        value = max(value, min(house_band(ctx.s).high - HEATWAVE_SPAN, min(aims.values())))
+        span = HEATWAVE_SPAN_MAX if ctx.energy.everywhere else HEATWAVE_SPAN
+        floor = min(_house_band(ctx).high - span, min(aims.values()))
+        value = max(value, floor + colder)
     return value
 
 
@@ -1326,11 +1695,28 @@ def _fan(
         peak=ctx.view.peak,
         open_total=sum(open_),
         open_count=len(open_),
+        pull_down=ctx.energy.pull_down,
+        sleep_boost=BEDTIME.pull_down,
     )
     if wanted is None or wanted == unit.fan_speed:
         return None
     if force or memory.fan_at is None or s.now - memory.fan_at >= FAN_DWELL:
         return wanted
+    return None
+
+
+def _vent_speed(ctx: _Context, force: bool) -> str | None:
+    """Return the fan speed for fan-only: low at Bedtime, the energy mode's otherwise."""
+    s, memory = ctx.s, ctx.memory
+    unit = s.unit
+    if unit.features.get(Feature.QUIET):
+        return None
+    wanted = "low" if ctx.profile is BEDTIME else ctx.energy.vent_fan
+    speed = vent_fan(s, wanted)
+    if speed is None or speed == unit.fan_speed:
+        return None
+    if force or memory.fan_at is None or s.now - memory.fan_at >= FAN_DWELL:
+        return speed
     return None
 
 
@@ -1344,6 +1730,70 @@ def _unsensed_setpoint(ctx: _Context) -> float | None:
         return None
     value = s.caps.round_temp(s.sleep_target)
     return value if unit.target_temp != value else None
+
+
+# What it is watching -------------------------------------------------------------------
+
+
+def _watch(ctx: _Context, deciding: list[ZoneInputs], judge: HvacMode) -> list[Watch]:
+    """Return the rooms worth keeping an eye on, with their trend and what comes next.
+
+    Rooms left to coast (and those whose coast did not work), rooms being
+    conditioned towards their aim, and at Bedtime the bedroom always.
+    """
+    memory, trend = ctx.memory, ctx.trend
+    out = []
+    for zone in deciding:
+        zm = memory.zone(zone.zone)
+        temp = zone.temperature
+        assert temp is not None
+        coast = zm.coast
+        if coast is not None:
+            mode, target = coast.mode, _coast_target(ctx, zone, coast.mode)
+        elif zm.role is Role.SERVE or _sleep_focus(ctx, zone):
+            mode, target = judge, _aim(ctx, zone, judge)
+        else:
+            continue
+        out.append(
+            Watch(
+                zone=zone.zone,
+                name=zone.name,
+                temperature=temp,
+                aim=round(target, 1),
+                mode=mode,
+                rate=trend.rate(zone.zone) if trend else None,
+                eta=trend.eta(zone.zone, temp, target) if trend else None,
+                deadline=coast.deadline if coast is not None and not coast.failed else None,
+                coasting=coast is not None and not coast.failed,
+            )
+        )
+    return out
+
+
+def _activity(ctx: _Context, choice: _Choice, watch: list[Watch]) -> tuple[Activity, str]:
+    action, mode = choice.action, choice.mode
+    if action is Action.REST:
+        if ctx.away_off:
+            return Activity.AWAY, choice.headline
+        coasting = [w.name for w in watch if w.coasting]
+        if coasting:
+            return Activity.WATCH, f"Watching {_join(coasting)}"
+        return Activity.REST, choice.headline or "Resting"
+    if action is Action.VENT:
+        return Activity.VENT, choice.headline
+    if action is Action.WAIT:
+        return Activity.WATCH, choice.headline
+    if action is Action.LEAVE:
+        return Activity.HOLD, choice.headline
+    if action is Action.IDLE:
+        return Activity.IDLE, choice.headline
+    if mode is HvacMode.HEAT:
+        return Activity.HEAT, choice.headline
+    if mode is HvacMode.COOL:
+        return Activity.COOL, choice.headline
+    if mode is HvacMode.DRY:
+        return Activity.DRY, choice.headline
+    return Activity.HOLD, choice.headline
 
 
 # Words -------------------------------------------------------------------------------
@@ -1366,22 +1816,80 @@ def _rooms(zones: list[ZoneInputs]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
+def _join(names: list[str]) -> str:
+    if len(names) > 3:
+        return f"{', '.join(names[:2])} and {len(names) - 2} more"
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _names(zones: list[ZoneInputs]) -> str:
+    """Return room names only, for a headline: "Bedroom", "Bedroom and Office"."""
+    return _join([z.name for z in zones]) if zones else "the rooms"
+
+
+def _rate_words(rate: float | None) -> str:
+    if rate is None:
+        return ""
+    if abs(rate) < 0.05:
+        return "not moving"
+    return f"{'rising' if rate > 0 else 'falling'} {abs(rate):.1f} °C an hour"
+
+
 def _coast_note(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> str:
-    """Explain a room left to coast, for example "Letting LIVING cool on its own"."""
+    """Explain a room left to coast.
+
+    For example "Letting LIVING (24 °C) cool on its own (8 °C outside, falling
+    0.6 °C an hour); cooling it at 23:40 if not."
+    """
     if not zones:
         return ""
     outdoor = ctx.s.outdoor_temp
-    outside = f" ({fmt(outdoor)} outside)" if outdoor is not None else ""
-    names = _rooms(zones)
-    if mode is HvacMode.COOL:
-        return f" Letting {names} cool on its own{outside}."
-    return f" Letting {names} warm up on its own{outside}."
+    notes = []
+    for zone in zones:
+        bits = [f"{fmt(outdoor)} outside"] if outdoor is not None else []
+        rate = ctx.trend.rate(zone.zone) if ctx.trend is not None else None
+        if rate is not None:
+            bits.append(_rate_words(rate))
+        detail = f" ({', '.join(bits)})" if bits else ""
+        verb = "cool" if mode is HvacMode.COOL else "warm up"
+        coast = ctx.memory.zone(zone.zone).coast
+        until = (
+            f"; {_word(mode)} it at {coast.deadline:%H:%M} if not"
+            if coast is not None and coast.mode is mode and not coast.failed
+            else ""
+        )
+        notes.append(f" Letting {_rooms([zone])} {verb} on its own{detail}{until}.")
+    return "".join(notes)
 
 
-def _rest_reason(coast: float) -> str:
+def _because(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> str:
+    """Return why rooms are not left to outside, as a sentence, from the first that says."""
+    outdoor = ctx.s.outdoor_temp
+    done = "cooled" if mode is HvacMode.COOL else "warmed up"
+    for zone in zones:
+        coast = ctx.memory.zone(zone.zone).coast
+        if coast is not None and coast.mode is mode and coast.failed:
+            minutes = int((ctx.s.now - coast.started).total_seconds() // 60)
+            if coast.failed == "trend":
+                rate = _rate_words(coast.rate)
+                return f" {zone.name} hasn't {done} on its own ({rate} in {minutes} min)."
+            if coast.failed == "deadline":
+                return f" {zone.name} hasn't {done} on its own in {minutes} min."
+        helps = outdoor is not None and (
+            outdoor < zone.temperature  # type: ignore[operator]
+            if mode is HvacMode.COOL
+            else outdoor > zone.temperature  # type: ignore[operator]
+        )
+        if helps:
+            word = "cool" if mode is HvacMode.COOL else "warm"
+            return f" Outside won't {word} {zone.name} soon enough."
+    return ""
+
+
+def _stay_reason(coast: float) -> str:
     if math.isinf(coast):
-        return "Resting: rooms are comfortable and will stay that way."
-    return f"Resting: rooms will stay comfortable for about {int(coast)} minutes."
+        return "rooms are comfortable and will stay that way."
+    return f"rooms will stay comfortable for about {int(coast)} minutes."
 
 
 def _unsensed_reason(ctx: _Context) -> str:
@@ -1390,7 +1898,7 @@ def _unsensed_reason(ctx: _Context) -> str:
     return ""
 
 
-# Without Room balancing or Bedtime -------------------------------------------------------
+# Without the Butler or Bedtime -----------------------------------------------------------
 
 
 def _light(
@@ -1401,20 +1909,14 @@ def _light(
     health: dict[int, ZoneHealth],
     memory: AutopilotMemory,
 ) -> Decision:
-    """Pre-conditioning, solar and presence with their light touch, and health."""
+    """Pre-conditioning and presence with their light touch, and health."""
     command = Command()
-    block = None
     reason = ""
     if switches.weather:
         command = precondition_command(s, blocks)
         active = _active_block(blocks, s.now)
         if active is not None and not command.is_empty:
             reason = active.reason
-    if switches.solar:
-        solar, block = solar_command(s, memory.solar)
-        command = command.merge(solar)
-        if block is not None and not reason:
-            reason = block.reason
     if switches.presence:
         command = command.merge(
             presence_command(s, memory.presence, extreme=view.heatwave or view.cold_snap)
@@ -1422,13 +1924,22 @@ def _light(
     care, why = _care(s, view, health, memory)
     command = command.merge(care)
     unit = s.unit
+    mode = unit.mode if unit.power else None
+    activity = {
+        HvacMode.HEAT: Activity.HEAT,
+        HvacMode.COOL: Activity.COOL,
+        HvacMode.DRY: Activity.DRY,
+        HvacMode.FAN_ONLY: Activity.VENT,
+    }.get(mode, Activity.REST if mode is None else Activity.HOLD)  # type: ignore[arg-type]
+    reason = why or reason
     return Decision(
         command=command,
-        mode=unit.mode if unit.power else None,
-        reason=why or reason,
+        mode=mode,
+        reason=reason,
         outlook=view,
         health=health,
-        solar_block=block,
+        activity=activity,
+        headline=reason.split(":")[0].split(".")[0] if reason else "",
     )
 
 

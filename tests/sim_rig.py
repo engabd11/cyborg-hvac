@@ -17,10 +17,14 @@ from cyborg_hvac.logic.autopilot import (
     decide,
     note_sent,
 )
+from cyborg_hvac.logic.comfort import in_night
 from cyborg_hvac.logic.guard import GuardConfig, GuardState, filter_command, record
 from cyborg_hvac.logic.planner import precondition_blocks
 from cyborg_hvac.logic.snapshot import ComfortSettings, ForecastPoint, HouseSnapshot, ZoneInputs
-from cyborg_hvac.logic.thermal import ThermalModel
+from cyborg_hvac.logic.thermal import ThermalModel, ThermalSample
+from cyborg_hvac.logic.trend import TrendTracker
+
+SAMPLE_EVERY = 5  # minutes between thermal model samples, as in Home Assistant
 
 
 def realistic(sim: SimSystem, loss: float = 0.002, capacity: float = 0.3) -> SimSystem:
@@ -48,7 +52,11 @@ class Rig:
     guard: GuardState = field(default_factory=GuardState)
     cfg: GuardConfig = field(default_factory=GuardConfig)
     model: ThermalModel = field(default_factory=ThermalModel)
+    trend: TrendTracker = field(default_factory=TrendTracker)
+    # Feed the thermal model every five minutes, as Home Assistant does.
+    learn: bool = False
     minute: int = 0
+    sample: ThermalSample | None = None
     sent: list[tuple[int, Command, Decision]] = field(default_factory=list)
     modes: list[HvacMode | None] = field(default_factory=list)
     temps: list[dict[int, float]] = field(default_factory=list)
@@ -106,14 +114,31 @@ class Rig:
             **self.snap_kw,
         )
 
+    def _learn(self, s: HouseSnapshot) -> None:
+        total = sum(z.opening for z in s.zones if z.on and z.opening > 0) or 1
+        sample = ThermalSample(
+            temps={z.zone: z.temperature for z in s.zones},  # type: ignore[misc]
+            outdoor=s.outdoor_temp,
+            running=s.unit.power,
+            mode=s.unit.mode,
+            shares={z.zone: (z.opening / total if z.on else 0.0) for z in s.zones},
+            night=in_night(s),
+        )
+        if self.sample is not None:
+            self.model.learn(self.sample, sample, SAMPLE_EVERY)
+        self.sample = sample
+
     def step(self) -> Decision:
         sim = self.sim
         if self.outdoor is not None:
             sim.outdoor = self.outdoor(self.minute)
         sim.step(1)
         s = self.snapshot()
+        self.trend.observe(s)
+        if self.learn and self.minute % SAMPLE_EVERY == 0:
+            self._learn(s)
         blocks = precondition_blocks(s, self.model) if self.switches.weather else []
-        decision = decide(s, self.switches, blocks, self.model, self.memory, (), 1.0)
+        decision = decide(s, self.switches, blocks, self.model, self.memory, (), 1.0, self.trend)
         while self.guard.writes and self.now - self.guard.writes[0] > self.cfg.budget_window:
             self.guard.writes.popleft()
         if not decision.command.is_empty and len(self.guard.writes) >= self.cfg.write_budget:

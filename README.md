@@ -8,7 +8,7 @@ Control your ducted air conditioner and every zone from Home Assistant, and let 
 
 Cyborg HVAC starts with Hisense ducted systems on the ConnectLife app and is built so other brands can plug in.
 
-This page is the full reference: every entity, option, behaviour and service. For a quick start, read [Install](#install) and [Set up](#set-up), then turn on one autopilot switch.
+This page is the full reference: every entity, option, behaviour and service. For a quick start, read [Install](#install) and [Set up](#set-up), then turn on the **Climate Butler**.
 
 ## Contents
 
@@ -17,7 +17,7 @@ This page is the full reference: every entity, option, behaviour and service. Fo
 - [Install](#install) and [Set up](#set-up)
 - [Entities](#entities)
 - [Options](#options): house sensors and weather, comfort targets, zone settings
-- [Smart comfort](#smart-comfort): advice, autopilot, how it decides, bedtime, guests, presence, weather, solar, health, windows, airflow, manual changes, learning
+- [Smart comfort](#smart-comfort): advice, the Climate Butler, how it decides, energy, ventilation, bedtime, guests, presence, weather, health, windows, airflow, manual changes, learning, the journal
 - [Services](#services)
 - [Dashboard card](#dashboard-card)
 - [Automation examples](#automation-examples)
@@ -31,7 +31,9 @@ This page is the full reference: every entity, option, behaviour and service. Fo
 - **The app's features as switches**: Powerful, Quiet, Sleep, Health, Energy Saving and 8 °C heat, each checked against the current mode so Home Assistant explains why a change is refused.
 - **Fast, light cloud use**: one request polls every unit, push updates arrive within seconds, and changes made together (a slider across five zones) go out as one command.
 - **Advice**: good practice for the house right now, from your room, presence, outdoor, forecast and solar sensors, with one tap to apply.
-- **Autopilot** (each part off until you turn it on): picks the mode, setpoint, fan and every damper together. It lets rooms coast when outside will do the work, keeps the house even with few, decisive changes, follows people around the house, starts early for the weather and heatwaves, uses spare solar, and acts on mould, condensation, overheated and cold rooms.
+- **The Climate Butler** (off until you turn it on): picks the mode, setpoint, fan and every damper together. It watches how fast each room is really warming or cooling and learns what each room does by itself (a bedroom with people asleep, a sunny lounge), so it lets outside do the work only while that is actually happening and steps in when it is not. It keeps the house even with few, decisive changes, keeps air moving through a comfortable house while the battery has charge, follows people around the house, starts early for the weather and heatwaves, and acts on mould, condensation, overheated and cold rooms. **Bedtime** holds the bedroom within half a degree all night.
+- **Energy** (Auto, Eco, Mid or Max): how much comfort is worth right now, set by hand or followed from your solar, battery and grid sensors. On Max (exporting, or plenty of solar) every room is kept near the middle of its range, even empty ones and while you are out.
+- **A journal** of everything the Butler did and why, on the card and in Home Assistant's history.
 - **A demo unit** that simulates rooms warming and cooling, for trying everything and building dashboards before you connect anything.
 
 ## Works with
@@ -46,7 +48,7 @@ Other Hisense air conditioners on ConnectLife (device type 009) load with their 
 
 - Home Assistant 2025.7 or newer.
 - A ConnectLife account with your air conditioner added in the app. Google, Apple and email sign-in all work.
-- Optional, for smart comfort: room temperature (and humidity) sensors, presence or motion sensors, window and door sensors, an outdoor temperature sensor or weather forecast, person entities, and a grid power sensor. Every one is optional; anything you leave out simply switches off what needs it.
+- Optional, for smart comfort: room temperature (and humidity) sensors, presence or motion sensors, window and door sensors, an outdoor temperature sensor or weather forecast, person entities, and grid, solar and battery sensors. Every one is optional; anything you leave out simply switches off what needs it.
 
 ## Install
 
@@ -92,7 +94,11 @@ Each unit is a device, and each zone is its own device linked to the unit, so zo
 | Filter (binary sensor) | Filter cleaning reminder. Starts disabled until its meaning is confirmed on ducted units. |
 | Advice (sensor) | How many recommendations are open; the top one and the full list are attributes. See [Advice](#advice). |
 | Guest mode (switch) | Puts guest zones first. See [Guest mode](#guest-mode). |
-| Autopilot: presence zoning, room balancing, weather pre-conditioning, solar shifting, bedtime (switches) | Each autopilot behaviour, off until you turn it on. Their attributes show manual holds (`paused_until`, `zones_paused`) and the last change with its reason (`last_action`). See [Autopilot](#autopilot). |
+| Climate Butler (switch) | Hands the unit to the Butler: mode, setpoint, fan and every damper. See [Climate Butler](#climate-butler). Its attributes, like the other three switches', show manual holds (`paused_until`, `zones_paused`) and the last change with its reason (`last_action`). Called *Autopilot: room balancing* before 0.7; its entity id stays the same. |
+| Bedtime (switch) | Holds the sleep zones within half a degree of the sleep temperature. See [Bedtime](#bedtime). |
+| Climate Butler: presence zoning, Climate Butler: weather pre-conditioning (switches) | What the Butler takes into account, each off until you turn it on. See [Climate Butler](#climate-butler). |
+| Energy (select) | Auto, Eco, Mid or Max. Its attributes say which mode is in use (`active`) and why (`reason`). See [Energy](#energy). Replaces *Autopilot: solar shifting*, which is removed. |
+| Climate Butler activity (sensor) | What the Butler is doing in one word: heating, cooling, drying, ventilating, idling, watching, resting, away, holding, paused or off, with the headline, the reason and the rooms it is watching as attributes. Home Assistant's history and logbook keep every change. |
 | Sleep temperature (number) | The temperature bedtime holds sleep zones at. |
 
 Switching on a feature the unit would refuse in its current mode is stopped with a clear message instead of failing silently in the cloud.
@@ -114,11 +120,17 @@ Integration page → **Configure** → **House sensors and weather**.
 
 | Option | Default | What it does |
 |---|---|---|
-| Outdoor temperature sensor | none | Outside temperature now. Used for advice, the season, [coasting](#how-autopilot-decides), and how damp cold walls get. The weather entity's temperature is used when this is empty. **The most useful input**: without any outdoor reading, autopilot cannot tell whether outside will cool or warm a room on its own. |
-| Weather forecast | none | An hourly forecast (the BOM integration works well). Used for the 24 hour plan, pre-conditioning, heatwaves and cold snaps, and coasting predictions. |
+| Outdoor temperature sensor | none | Outside temperature now. Used for advice, the season, [coasting](#how-the-butler-decides), and how damp cold walls get. The weather entity's temperature is used when this is empty. **The most useful input**: without any outdoor reading, autopilot cannot tell whether outside will cool or warm a room on its own. |
+| Weather forecast | none | An hourly forecast (the BOM integration works well). Used for pre-conditioning, heatwaves and cold snaps, coasting predictions, and what the card shows coming up. |
 | People | none | Person entities, trackers or presence sensors that are on while someone is home. With none, the house always counts as occupied. |
-| Grid power sensor | none | Spots spare solar. Watts or kilowatts. |
+| Grid power sensor | none | Spots export to the grid. Watts or kilowatts. |
 | Grid power is negative while exporting | on | Most inverters report export as negative grid power. Turn off if yours reports export as positive. |
+| Solar power sensor | none | What the panels make now. Watts or kilowatts. |
+| Battery power sensor | none | Power into or out of the house battery. Watts or kilowatts. |
+| Battery power is negative while charging | on | Turn off if your battery reports charging as positive. |
+| Battery charge sensor | none | The house battery's charge in percent. Decides [ventilation](#ventilation). |
+| Plenty of solar | 6 kW (0.5 to 50) | Solar output that counts as free power (Max), even without exporting. |
+| Keep air moving above | 30% (0 to 100) | While every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. |
 | Window delay | 2 min (0 to 30) | How long a window stays open before its zone counts as open to outside. |
 | Door delay | 5 min (0 to 60) | The same for doors; longer, because doors are walked through. |
 | Fewest open zones | 2 (1 to 4) | While the unit runs, autopilot never goes below this many open zones. Only lower it if your installer says one zone is safe. |
@@ -131,8 +143,8 @@ Integration page → **Configure** → **Comfort targets**. Below the heating ta
 
 | Option | Default | What it does |
 |---|---|---|
-| Heating target, day / night / away | 20 / 18 / 16 °C | The bottom of the comfort range. Autopilot aims half a degree above it when heating. |
-| Cooling target, day / night / away | 24 / 25 / 28 °C | The top of the comfort range. Autopilot aims half a degree below it when cooling. |
+| Heating target, day / night / away | 20 / 18 / 16 °C | The bottom of the comfort range. On Mid the Butler aims half a degree above it when heating ([Energy](#energy) moves the aim). |
+| Cooling target, day / night / away | 24 / 25 / 28 °C | The top of the comfort range. On Mid the Butler aims half a degree below it when cooling. |
 | Highest comfortable humidity | 65% | Above this, advice suggests dry mode and autopilot dries the house (outside the heating season). |
 | Night starts / Night ends | 22:00 / 06:30 | When the night targets apply. |
 
@@ -188,71 +200,74 @@ The **Advice** sensor and the [dashboard card](#dashboard-card) list what would 
 | `away_setback`, `away_off` | Everyone is out: set back for a short trip, turn off for a long one (setback is kept while a heatwave or cold snap is coming). |
 | `weather_heatwave` | A heatwave is forecast: what to do. |
 | `weather_precool`, `weather_preheat` | A hot day or cold night ahead: pre-cool or pre-heat while it is cheaper. |
-| `solar_precool`, `solar_preheat` | You are exporting spare solar: bank some comfort now. |
+| `solar_precool`, `solar_preheat` | You are exporting spare solar and the unit is off: bank some comfort now (with the Butler on, set Energy to Auto or Max instead). |
 
-### Autopilot
+### Climate Butler
 
-Five switches on the unit, each off until you turn it on. Turning one on acts straight away.
+Four switches and a select on the unit. Each switch is off until you turn it on, and turning one on acts straight away: it also ends any hold left by an earlier manual change, because switching it on hands the unit over.
 
-| Switch | What it does |
+| Control | What it does |
 |---|---|
-| Autopilot: room balancing | Hands the unit to the autopilot engine: the mode, setpoint, fan and every damper, so every room with a sensor holds its range and the house stays even. See [How autopilot decides](#how-autopilot-decides). |
-| Autopilot: bedtime | The same engine, focused on sleep zones at the sleep temperature. See [Bedtime](#bedtime). |
-| Autopilot: presence zoning | Rooms empty for 30 minutes (after the presence hold) only need to stay tolerable and get little or no air; rooms people walk into get theirs back. While everyone is out the house drops to the away targets, and switches off after 2 hours (not during a heatwave or cold snap). See [Presence and away](#presence-and-away). |
-| Autopilot: weather pre-conditioning | Uses the hourly forecast and what it has learned about your rooms to start early, so rooms are comfortable when night or morning begins, or before a heat spike or heatwave. See [Weather](#weather-heatwaves-and-cold-snaps). |
-| Autopilot: solar shifting | While you export spare solar, cools or warms up to a degree further within comfort, and stops when the surplus ends. See [Spare solar](#spare-solar). |
+| Climate Butler | Hands the unit to the Butler: the mode, setpoint, fan and every damper, so every room with a sensor holds its range and the house stays even. See [How the Butler decides](#how-the-butler-decides). |
+| Bedtime | The same engine, holding sleep zones within half a degree of the sleep temperature. See [Bedtime](#bedtime). |
+| Climate Butler: presence zoning | Rooms empty for 30 minutes (after the presence hold) only need to stay tolerable and get little or no air; rooms people walk into get theirs back. While everyone is out the house drops to the away targets, and switches off after 2 hours (not during a heatwave or cold snap, and not on Max). See [Presence and away](#presence-and-away). |
+| Climate Butler: weather pre-conditioning | Uses the hourly forecast and what the Butler has learned about your rooms to start early, so rooms are comfortable when night or morning begins, or before a heat spike or heatwave. See [Weather](#weather-heatwaves-and-cold-snaps). |
+| Energy (select) | How much comfort is worth: Auto, Eco, Mid or Max. See [Energy](#energy). |
 
-With room balancing or bedtime on, presence, the forecast, solar and health all feed the one engine. Without them, presence, pre-conditioning and solar keep a lighter touch: they start, set back and restore the unit, and leave the dampers to you (presence still closes empty rooms). [Health](#health) protection runs whenever any switch is on.
+With the Climate Butler or Bedtime on, presence, the forecast, the energy mode and health all feed the one engine. Without them, presence and pre-conditioning keep a lighter touch: they start, set back and restore the unit, and leave the dampers to you (presence still closes empty rooms). [Health](#health) protection runs whenever any switch is on.
 
-### How autopilot decides
+### How the Butler decides
 
 The engine runs every minute and picks the gentlest lever that gets each room where it should be, in this order:
 
-1. **Let it coast.** A room past its aim that outside will bring back on its own within 2 hours (cooling down on a cold night, warming up on a mild day) is closed and left to drift, rather than switching heating to cooling. The prediction uses what autopilot has learned about the room and the forecast, and is checked against what happens: a room that does not move as predicted (sun, people, a heater) stops counting as coasting.
+1. **Let it coast, while it works.** A room past its aim that outside will bring back on its own soon (cooling down on a cold night, warming up on a mild day) is left to drift rather than switching heating to cooling. The prediction uses what the Butler has learned about the room, its own warmth included, and the forecast. The room gets a fixed deadline (half as long again as predicted, at least 15 minutes, at most the energy mode's limit). After 15 minutes (10 at bedtime) its measured trend must agree: a room that is not moving, or too slowly to make the deadline, is handed to the unit there and then, and stays handed until it is back in range. While other rooms are being served, or when a change of mode rides on it, a coasting room is closed, so its trend shows what the room really does.
 2. **Move a damper** when rooms differ from each other. A room behind the others gets more air, a room holding its aim gets its learned holding opening, and a room well ahead is closed until it is level with the rest of the house, then rejoins.
-3. **Move the setpoint** when the house as a whole is off. The unit regulates on return air, so the setpoint is corrected for how far that reads from the rooms, with a gentle push while a room is short and a slow correction that learns any steady error.
+3. **Move the setpoint** when the house as a whole is off. The unit regulates on return air, so the setpoint is corrected for how far that reads from the rooms, with a gentle push while a room is short and a slow correction that learns any steady error. Its limits move with that correction too: cooling one warm bedroom while the rest of the house is cold, the unit reads cold return air and is set lower than the bedroom's aim, or it would never cool it.
 4. **Change mode** only when nothing gentler works.
-5. **Rest**: when every room will stay comfortable for a while, the unit switches off rather than idling, and starts again when a room needs it.
+5. **Keep air moving or rest**: when every room will stay comfortable for a while, the fan keeps air moving through the house if there is power to spare (see [Ventilation](#ventilation)); otherwise the unit switches off rather than idling. It starts again the moment a room needs it.
 
 **While the unit rests but its fan runs** (its own reading has sat past its setpoint for 10 minutes, so the compressor is off), the fan's air is just the house's air going round. Rooms well ahead of the rest (too warm while heating, too cool while cooling) get their damper fully open, so that air evens them out for free, while the other rooms keep their opening. The moment a room needs the unit again, those rooms go back to normal (closed if they are well ahead) in the same command. Not during a heatwave's hottest hours.
 
-The dashboard card shows what autopilot is doing and why (for example "Heating HQ (19.5 °C). Letting LIVING (24 °C) cool on its own (8 °C outside).") and each zone's role. The same is in the websocket feed and in diagnostics.
+The dashboard card shows what the Butler is doing and why (for example "Letting LIVING (24 °C) cool on its own (8 °C outside, falling 0.6 °C an hour); cooling it at 23:40 if not."), the rooms it is watching, and each zone's role. The same is in the websocket feed, the activity sensor and diagnostics, and every decision goes into the [journal](#journal).
 
 | Role | Meaning |
 |---|---|
 | serve | Behind its aim: more air, up to fully open. |
 | hold | At its aim: its learned holding opening. |
-| shed | Ahead of the house: closed until it is level with the other rooms. |
+| shed | Ahead of the house: closed until it is level with the other rooms. Also a room left to coast while the unit serves others. |
 | mix | Well ahead (1 degree or more past its aim) while the unit rests with its fan still running: fully open, so air from the rest of the house evens it out for free. Ends the moment the unit works again. |
+| vent | Every room is comfortable and the fan keeps air moving: fully open. |
 | setback | Empty, or second while guests or sleepers come first: closed, or a small trickle (20 to 30%) if it would get too cold or warm. |
 | keeper | Kept open so the fan has enough duct. |
 | shut | A window or door is open. |
 | held | A person changed it; left alone for 2 hours. |
 | free | Not autopilot's to move (no sensor and nothing asks for it). |
 
-**Few, decisive changes.** The limits autopilot works within:
+**Few, decisive changes.** The limits the Butler works within:
 
 | What | Limit |
 |---|---|
-| A room counts as needing air | half a degree short of its aim |
+| A room counts as needing air | half a degree short of its aim (0.3 on Max and at bedtime) |
 | A room is closed for being ahead | 1.5 degrees past its aim (0.5 at bedtime), and only while other rooms still need the unit |
 | Damper moves | straight to the target in one move (100% to 60%, not four steps); then at least 15 minutes before it moves again; moves under 20% wait until the zone opens or closes |
 | Setpoint changes | by 1 degree or more (half a degree at bedtime), at most every 15 minutes, except to ease off once rooms overshoot |
 | Fan changes | at most every 30 minutes |
-| Starting from rest | a room half a degree short for 5 minutes, or a degree short straight away |
-| Heating to cooling or back | a room too warm (or cold) for 20 minutes that outside will not fix, nothing else still needing the current mode, an hour in the current mode, and in the heating season a room 1.5 degrees further past its range before cooling is used (and the other way round) |
-| Never | auto mode (it is replaced with heat or cool); heating set above 25.5 °C or cooling below 21.5 °C unless your targets ask for it |
-| Guard rails, whatever the engine wants | 8 minutes between compressor on and off; 30 minutes between mode changes; 5 minutes between setpoint writes; 2 minutes between moves of one zone; at most 6 commands in 10 minutes; the airflow floor; manual holds |
+| Starting from rest | a room short for 5 minutes, or a degree short straight away; at once for a room whose coast did not work, and for the bedroom at bedtime |
+| Heating to cooling or back | a room too warm (or cold) that outside is not fixing, nothing else still needing the current mode, and the energy mode's wait (see [Energy](#energy)); straight away once a coasting room has been seen not to come back. In the season against it, a room must also be further past its range (2 degrees on Eco, 1.5 on Mid, a quarter on Max, none at bedtime) |
+| Never | auto mode (it is replaced with heat or cool); heating set above 25.5 °C or cooling below 21.5 °C, unless your targets or cold return air ask for it |
+| Guard rails, whatever the engine wants | 8 minutes between compressor on and off; 30 minutes between heating and cooling (8 to or from fan only or dry); 5 minutes between setpoint writes; 2 minutes between moves of one zone; at most 6 commands in 10 minutes; the airflow floor; manual holds |
 
 Everything goes out as one command. Openings are sent before closings, so the fan never sees too little duct.
 
-**Fan**: auto normally; low when cooling humid air (a slow fan dries better) and at bedtime (quieter, medium while the bedroom is well short); high during a heatwave's hottest hours or when the house is 2 degrees behind; at most medium when less duct is open than the airflow floor. A fan speed someone picks is left alone for 2 hours, and the fan is left alone while Quiet is on.
+**Fan**: auto normally; low when cooling humid air (a slow fan dries better) and at bedtime (quieter, medium while the bedroom is a degree short); high during a heatwave's hottest hours or when the house is well behind (2 degrees on Eco and Mid, 1 on Max); at most medium when less duct is open than the airflow floor. While only moving air it runs low (medium on Max). A fan speed someone picks is left alone for 2 hours, and the fan is left alone while Quiet is on.
 
 ### Bedtime
 
-Turn on **Autopilot: bedtime** at bedtime (by hand or with an [automation](#automation-examples)) and set **Sleep temperature**. Sleep zones are held within half a degree of it whatever the rest of the house does: the unit's mode and setpoint follow the bedroom, and the other zones close down as far as the airflow floor allows, keeping the spill zone as the second air path, with a small trickle for any that would get too cold or warm. Sleep zones always count as occupied, and the other zones count as empty while bedtime is on.
+Turn on **Bedtime** at bedtime (by hand or with an [automation](#automation-examples)) and set **Sleep temperature**. Sleep zones are held within half a degree of it whatever the rest of the house does and whatever the energy mode: the unit's mode and setpoint follow the bedroom, and the other zones close down as far as the airflow floor allows, keeping the spill zone as the second air path, with a small trickle for any that would get too cold or warm. Sleep zones always count as occupied, and the other zones count as empty while bedtime is on.
 
-If the bedroom is warmer than the sleep temperature on a cold night, bedtime does not cool it: the unit rests (or idles) while outside brings the bedroom down, then holds it there. With only the bedroom being conditioned, the setpoint does the fine work and its damper stays fully open. The fan runs low. Without a bedroom temperature sensor, bedtime can only hold the unit at the sleep temperature.
+Bedtime acts early: heating or cooling starts once the bedroom is 0.3 degrees off, or as soon as its trend says it will leave its half degree within 15 minutes. If the bedroom is warm on a cold night, it is left to cool on its own only if outside will have it back within 45 minutes; the unit stops sending it warm air meanwhile, and after 10 minutes its trend must show it really is cooling. A closed bedroom with people asleep often is not, and then bedtime cools it, even on a cold night, rather than waiting. What it learns about the bedroom's own warmth at night makes it skip the wait next time.
+
+With only the bedroom being conditioned, the setpoint does the fine work and its damper stays fully open. The fan runs low. Without a bedroom temperature sensor, bedtime can only hold the unit at the sleep temperature.
 
 ### Guest mode
 
@@ -262,7 +277,7 @@ Mark the living and dining zones as guest zones. With **Guest mode** on, they ge
 
 A room with presence sensors is empty once every sensor has been quiet for its presence hold. After 30 minutes empty, presence zoning closes it (or trims it to its minimum opening) and its comfort range widens towards the away range; someone walking in gets the room back. Empty rooms count for less (30%) in the house average.
 
-While everyone is out (all your people away), the house uses the away targets. With presence zoning on, the unit switches off after 2 hours away, unless a heatwave or cold snap is forecast, when it holds the away targets instead: a house left to 35 °C or 10 °C takes hours to recover. When someone comes home the normal targets return.
+While everyone is out (all your people away), the house uses the away targets. With presence zoning on, the unit switches off after 2 hours away, unless a heatwave or cold snap is forecast, when it holds the away targets instead: a house left to 35 °C or 10 °C takes hours to recover. On Max the house keeps its normal comfort while you are out, since the power is free. When someone comes home the normal targets return.
 
 ### Weather, heatwaves and cold snaps
 
@@ -270,17 +285,31 @@ While everyone is out (all your people away), the house uses the away targets. W
 
 **Pre-conditioning** (weather pre-conditioning on): before night starts and before morning, autopilot predicts where rooms would drift by then and, if they would leave the comfort range, starts early enough to have them in range in time (with a 25% margin). A forecast 8 degrees above your day cooling target within 12 hours gets a pre-cool to a degree below the target, finishing 3 hours before the peak. The plan is shown on the card.
 
-**Heatwave**: a forecast of 35 °C or more, or 10 degrees above your day cooling target if that is higher. Pre-cooling starts twice as early, in the cool of the morning, when the unit works far better. During the hottest hours (outside 6 degrees above your cooling target) autopilot focuses air on occupied rooms, runs the fan high, accepts rooms at the top of the range, and never sets cooling more than 2 degrees below your cooling target: lower does not cool faster and only overshoots once the heat breaks. Advice suggests closing blinds and doors.
+**Heatwave**: a forecast of 35 °C or more, or 10 degrees above your day cooling target if that is higher. Pre-cooling starts twice as early, in the cool of the morning, when the unit works far better. During the hottest hours (outside 6 degrees above your cooling target) the Butler focuses air on occupied rooms, runs the fan high, accepts rooms at the top of the range, and never sets cooling more than 2 degrees below your cooling target: lower does not cool faster and only overshoots once the heat breaks. On Max it keeps every room near the middle of its range instead, and goes down to 3 degrees below. Advice suggests closing blinds and doors.
 
 **Cold snap**: a forecast 13 degrees below your night heating target (5 °C with the defaults). Away keeps the setback instead of switching off.
 
-### Spare solar
+### Energy
 
-With solar shifting on and a grid power sensor set, exporting 1.5 kW or more starts banking comfort: cooling a degree further down when it is hot outside, or heating a degree further up when it is cold, always within your comfort range. It stops when export drops below 600 W or everyone leaves. The banking shows on the card's 24 hour plan.
+The **Energy** select says how much comfort is worth right now. Set it by hand, or leave it on **Auto** to follow your solar, battery and grid sensors.
+
+| Mode | When Auto picks it | What it means |
+|---|---|---|
+| Eco | Running on the battery or the grid, little solar | Rooms may sit nearer the edges of their range (0.3 degrees inside); outside gets up to 3 hours to bring a room back; heating and cooling change over only after a room has stayed out for 20 minutes, at most once an hour, and 2 degrees further out in the season against it. |
+| Mid | Solar charging the battery (at least 300 W of solar and 200 W into the battery; without a battery sensor, 1.5 kW of solar). Also used with no solar or battery sensors at all. | The everyday balance: rooms aim half a degree inside their range; outside gets up to 2 hours; changeovers as on Eco but 1.5 degrees further out. |
+| Max | Exporting 300 W or more, or solar at or above **Plenty of solar** (6 kW) | Comfort comes first, because the power is free: every room aims within half a degree of the middle of its range, empty and second rooms included, and while everyone is out; rooms count as needing air 0.3 degrees off; outside gets 30 minutes; changeovers after 10 minutes, at most every half hour; the fan goes high at a degree behind. |
+
+A new mode must last 10 minutes before Auto uses it, so a passing cloud changes nothing, and Max stays while export is above 100 W or solar within 1 kW of plenty. The select's attributes, the activity sensor and the card say which mode is in use and why, for example "Exporting 3.4 kW: comfort comes first". Bedtime holds the bedroom within half a degree whatever the mode.
+
+### Ventilation
+
+When every room is comfortable and nothing needs heating or cooling for a while, the Butler runs the fan only rather than switching off, so air keeps moving through the house: rooms stay fresh, and warm or cool spots even out with the rest of the house for the price of the fan. It does this while the house battery is above **Keep air moving above** (30%), starting again only once it is 3 points above that; without a battery charge sensor, only on Max. Not while drying, and not while everyone is out (except on Max).
+
+Every zone opens fully, except a room the house's mixed air would push out of its range (one within 0.3 degrees of the edge on that side), which closes until it is 0.6 inside again. The fan runs low (medium on Max, low at bedtime). The moment a room needs heating or cooling, the unit switches straight back.
 
 ### Health
 
-Autopilot watches every room with a temperature sensor, and with a humidity reading it also watches the walls. While any autopilot switch is on it acts on these even where your settings or presence would not; the advice flags them either way.
+The Butler watches every room with a temperature sensor, and with a humidity reading it also watches the walls. While any switch is on it acts on these even where your settings, presence or the energy mode would not; the advice flags them either way.
 
 | Condition | When | What autopilot does |
 |---|---|---|
@@ -301,11 +330,19 @@ While the unit runs, autopilot keeps at least 2 zones open with their openings a
 
 ### Manual changes
 
-If someone changes a zone, the unit or its fan in Home Assistant, the ConnectLife app or on the wall controller, autopilot leaves that alone for 2 hours (changes autopilot made itself are recognised and never count). The controller opening a spill zone by itself does not count either. The card marks held zones with a hand. **Resume** (or `cyborg_hvac.resume_autopilot`) ends holds early; **Pause 2 h** (or `cyborg_hvac.pause_autopilot`) holds everything.
+If someone changes a zone, the unit or its fan in Home Assistant, the ConnectLife app or on the wall controller, the Butler leaves that alone for 2 hours (changes it made itself are recognised and never count), and notes it in the journal. The controller opening a spill zone by itself does not count either. The card marks held zones with a hand. **Resume** (or `cyborg_hvac.resume_autopilot`) ends holds early; **Pause 2 h** (or `cyborg_hvac.pause_autopilot`) holds everything. Switching the Climate Butler, Bedtime or another behaviour on also ends the holds on the unit and fan: that is handing it over.
 
 ### Learning
 
-Cyborg HVAC learns, per room, how fast it loses heat to outside and how quickly the unit warms or cools it. It starts from typical values and becomes confident after a few hours of each, which makes pre-conditioning start at the right time and coasting predictions accurate. It also learns each room's **holding opening**: how much air keeps it level with the rest of the house, in heating and in cooling. A room that keeps drifting ahead of the others gets less next time, one that falls behind gets more (a bigger step the further out it is), so the dampers settle and move less over time. What it learns survives restarts.
+Cyborg HVAC learns, per room, how fast it loses heat to outside, how quickly the unit warms or cools it, and how much warmth (or chill) the room adds by itself, separately by day and by night: people asleep with the door shut, a sunny window, a computer. Loss and the room's own warmth are learned together from how the room drifts while the unit is off, and told apart as the gap to outside changes through the day. It starts from typical values and becomes confident after a few hours of each, which makes pre-conditioning start at the right time and coasting predictions accurate. Once a room's own warmth reaches about 0.3 degrees an hour, the journal says so ("Learned: MASTER keeps itself warm at night"), and the Butler stops waiting for outside to cool that room.
+
+Alongside the model, the Butler measures each room's trend: how fast it is moving now, from its readings since the last change in what it gets (the unit's mode, its damper opening or closing). That is what a coasting room is checked against, what Bedtime looks ahead with, and what the card shows.
+
+It also learns each room's **holding opening**: how much air keeps it level with the rest of the house, in heating and in cooling. A room that keeps drifting ahead of the others gets less next time, one that falls behind gets more (a bigger step the further out it is), so the dampers settle and move less over time. What it learns survives restarts.
+
+### Journal
+
+Everything the Butler does goes into its journal: each command with what it set ("Cool", "22.5°", "Bedroom 100%", "Living closed") and why; plans it made without a change (starting to watch a room, resting); energy mode changes; your own changes it is leaving alone; behaviours switched on or off; and what it has learned about your rooms. The same plan is not written twice within half an hour. The journal keeps 7 days (up to 500 entries) and survives restarts. The card shows the latest and loads the rest on demand (websocket command `cyborg_hvac/journal`), and the **Climate Butler activity** sensor puts every change of activity in Home Assistant's history and logbook, for as long as you keep history.
 
 ## Services
 
@@ -320,13 +357,13 @@ Cyborg HVAC learns, per room, how fast it loses heat to outside and how quickly 
 
 ## Dashboard card
 
-The **HVAC card** in [Cyborg Cards](https://github.com/engabd11/cyborg-cards) (`custom:cyborg-hvac-card`, version 1.4.4 or newer for everything here) shows the unit, every zone with its role and health, advice with Apply and Dismiss, the 24 hour plan, and the autopilot switches, with what autopilot is doing and why.
+The **HVAC card** in [Cyborg Cards](https://github.com/engabd11/cyborg-cards) (`custom:cyborg-hvac-card`, version 1.5.0 or newer for everything here) shows the unit, every zone with its role and health, advice with Apply and Dismiss, the Butler controls with the energy setting, and the **Climate Butler** panel: what it is doing now and why, the rooms it is watching with their trend and when it steps in, what is coming up, and its journal with a week of history.
 
 The card reads one live feed per unit over the websocket instead of rebuilding the logic in the browser, so any card or tool can use it. See the [card contract](https://github.com/engabd11/cyborg-hvac/blob/main/docs/card-contract.md).
 
 ## Automation examples
 
-Bedtime at 10 pm, off in the morning:
+Bedtime at 10 pm, off in the morning (before 0.7 the switch was `switch.<unit>_autopilot_bedtime`; an existing install keeps that id):
 
 ```yaml
 automation:
@@ -337,7 +374,7 @@ automation:
     actions:
       - action: switch.turn_on
         target:
-          entity_id: switch.duct_air_conditioner_autopilot_bedtime
+          entity_id: switch.duct_air_conditioner_bedtime
   - alias: Bedtime off
     triggers:
       - trigger: time
@@ -345,7 +382,24 @@ automation:
     actions:
       - action: switch.turn_off
         target:
-          entity_id: switch.duct_air_conditioner_autopilot_bedtime
+          entity_id: switch.duct_air_conditioner_bedtime
+```
+
+Keep the battery for the night on a cloudy day:
+
+```yaml
+automation:
+  - alias: Energy on Eco when the battery is low
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.house_battery
+        below: 40
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.duct_air_conditioner_energy
+        data:
+          option: eco
 ```
 
 Get a notification when a room is at risk of mould:
@@ -374,10 +428,10 @@ Entity ids depend on your unit's name; check them under the device.
 
 ## Troubleshooting
 
-- **Autopilot is not changing a zone or the unit.** Someone changed it in the last 2 hours (the card shows a hand, and the autopilot switches' `zones_paused` and `paused_until` attributes say until when). Press **Resume**. Also check the window and door sensors: an open zone is left closed.
-- **It will not switch from heating to cooling.** Usually on purpose: outside will bring the room back on its own (the reason says "Letting … cool on its own"), the unit changed mode less than an hour ago, or it is the heating season and the room is not far enough past its range. Without an outdoor sensor or forecast, autopilot needs a larger difference before switching.
+- **The Butler is not changing a zone or the unit.** Someone changed it in the last 2 hours (the card shows a hand, the journal says until when, and the switches' `zones_paused` and `paused_until` attributes too). Press **Resume**, or switch the Climate Butler off and on. Also check the window and door sensors: an open zone is left closed.
+- **It will not switch from heating to cooling.** Look at the card's Watching list: a room left to cool on its own shows how fast it is falling and when the Butler steps in if it has not. Otherwise the unit changed between heating and cooling recently (the reason says when it may again), or it is the season against it and the room is not far enough past its range for the energy mode (Max and Bedtime need little or nothing). Without an outdoor sensor or forecast, it needs a larger difference before switching.
 - **A room is closed even though it is only a bit warm.** It is ahead of the others while they still need heating, and rejoins once it is level with them (role `shed`).
-- **Why did it do that?** The autopilot switches' `last_action` attribute has the time, the command and the reason; the card shows the current decision. [Diagnostics](https://www.home-assistant.io/docs/configuration/troubleshooting/#download-diagnostics) include autopilot's state and decision and the unit's raw status, with identifiers removed.
+- **Why did it do that?** The [journal](#journal) on the card has every change with its reason, and the Climate Butler activity sensor's history shows what it was doing when. [Diagnostics](https://www.home-assistant.io/docs/configuration/troubleshooting/#download-diagnostics) include the Butler's state and decision, the energy mode, each room's trend, what it has learned and the latest journal, and the unit's raw status, with identifiers removed.
 - **Room by room features do nothing.** The zone needs a room temperature sensor.
 - **The sign-in redirect does not come back.** Use **Sign in, then paste the address**.
 

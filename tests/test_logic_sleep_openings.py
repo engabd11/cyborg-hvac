@@ -69,15 +69,20 @@ def test_sleep_starts_an_idle_unit_in_the_right_mode():
     assert command.mode is HvacMode.COOL
 
 
-def test_sleep_lets_a_warm_bedroom_cool_on_its_own_on_a_cold_night():
+def test_sleep_lets_a_warm_bedroom_cool_on_its_own_only_when_that_is_soon():
     s = snap(
-        (z(1, 25.0, sleep=True), z(2)),
+        (z(1, 24.0, sleep=True), z(2)),
         power=False,
         sleep_mode=True,
         sleep_target=23.0,
         outdoor_temp=6.0,
     )
-    assert bedtime(s) == Command()  # outside cools it; the unit stays off
+    assert bedtime(s) == Command()  # outside has it back within half an hour; the unit stays off
+    # Two degrees out would take outside an hour: Bedtime does not wait that long.
+    far = replace(s, zones=(z(1, 25.0, sleep=True), z(2)))
+    command = bedtime(far)
+    assert command.power is True
+    assert command.mode is HvacMode.COOL
 
 
 # Openings -----------------------------------------------------------------------

@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
-from ..core.model import Command, UnitState, ZoneCommand
+from ..core.model import Command, HvacMode, UnitState, ZoneCommand
 from .snapshot import HouseSnapshot, ZoneInputs
 
 
@@ -23,7 +23,8 @@ class GuardConfig:
     budget_window: timedelta = timedelta(minutes=10)
     setpoint_interval: timedelta = timedelta(minutes=5)
     compressor_min: timedelta = timedelta(minutes=8)
-    # Least time between two mode changes, whatever autopilot thinks.
+    # Least time between switching heating and cooling, whatever autopilot thinks. Other mode
+    # changes (to or from fan-only or drying) only wait out compressor_min.
     mode_interval: timedelta = timedelta(minutes=30)
     zone_interval: timedelta = timedelta(minutes=2)
     override_hold: timedelta = timedelta(hours=2)
@@ -65,6 +66,10 @@ class GuardState:
         self.zone_paused_until.clear()
 
 
+# Modes that work the compressor against each other: switching between them waits longest.
+_FLIPPING = {HvacMode.HEAT, HvacMode.COOL, HvacMode.AUTO}
+
+
 def _airflow_ok(s: HouseSnapshot, zones: list[ZoneInputs]) -> bool:
     open_zones = [z for z in zones if z.on and z.opening > 0]
     return (
@@ -104,13 +109,10 @@ def filter_command(
     if mode is not None and mode == unit.mode:
         mode = None
     starting = power is True and not unit.power
-    if (
-        mode is not None
-        and not starting
-        and state.last_mode
-        and now - state.last_mode < cfg.mode_interval
-    ):
-        # Too soon to flip modes: the setpoint and fan were meant for the new one.
+    flip = {unit.mode, mode} <= _FLIPPING
+    gap = cfg.mode_interval if flip else cfg.compressor_min
+    if mode is not None and not starting and state.last_mode and now - state.last_mode < gap:
+        # Too soon to change modes: the setpoint and fan were meant for the new one.
         mode = target = fan = None
     too_soon = state.last_setpoint and now - state.last_setpoint < cfg.setpoint_interval
     if (

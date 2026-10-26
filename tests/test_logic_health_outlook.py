@@ -211,6 +211,12 @@ def test_guard_never_flips_modes_quickly():
         )
         == flip
     )
+    # Leaving fan-only (ventilating) only waits for the compressor, not for a flip.
+    venting = replace(s, unit=replace(s.unit, mode=HvacMode.FAN_ONLY))
+    state4 = GuardState()
+    record(state4, Command(mode=HvacMode.FAN_ONLY), T0)
+    assert filter_command(cfg, state4, venting, flip, T0 + timedelta(minutes=5)) is None
+    assert filter_command(cfg, state4, venting, flip, T0 + timedelta(minutes=9)) == flip
     # Starting a unit that is off is not a flip.
     off = replace(s, unit=replace(s.unit, power=False, mode=HvacMode.COOL))
     start = Command(power=True, mode=HvacMode.HEAT)

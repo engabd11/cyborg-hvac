@@ -18,6 +18,8 @@ POWERFUL_BOOST = 1.4
 ECO_LIMIT = 0.7
 QUIET_LIMIT = 0.8
 FAN_FACTOR = {"low": 0.6, "medium": 0.8, "high": 1.0, "auto": 1.0}
+# Fan-only: share of the gap to the return air each open zone closes per minute at full fan.
+MIX_RATE = 0.03
 
 
 @dataclass(slots=True)
@@ -76,7 +78,10 @@ class SimSystem:
             zone.temperature += zone.gain * minutes
 
         self.output = 0.0
-        if not self.power or self.mode in (HvacMode.FAN_ONLY, HvacMode.DRY):
+        if self.power and self.mode is HvacMode.FAN_ONLY:
+            self._mix(minutes)
+            return
+        if not self.power or self.mode is HvacMode.DRY:
             return
         weights = self.open_weights()
         if not weights:
@@ -101,3 +106,14 @@ class SimSystem:
         for n, weight in weights.items():
             # Spread per zone so a single open zone heats faster than five.
             self.zones[n].temperature += delivered * weight * zone_count / max(1, len(weights))
+
+    def _mix(self, minutes: float) -> None:
+        """Fan only: the open zones get the house's return air, so they even out."""
+        weights = self.open_weights()
+        if not weights:
+            return
+        returned = self.return_air()
+        rate = MIX_RATE * FAN_FACTOR.get(self.fan, 1.0) * minutes
+        for n, weight in weights.items():
+            share = min(1.0, rate * weight * len(weights))
+            self.zones[n].temperature += (returned - self.zones[n].temperature) * share

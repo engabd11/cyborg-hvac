@@ -22,6 +22,9 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ADVICE_INTERVAL_SECONDS,
+    CONF_BATTERY_CHARGING_NEGATIVE,
+    CONF_BATTERY_POWER_SENSOR,
+    CONF_BATTERY_SOC_SENSOR,
     CONF_COOL_AWAY,
     CONF_COOL_DAY,
     CONF_COOL_NIGHT,
@@ -34,6 +37,7 @@ from .const import (
     CONF_HUMIDITY_MAX,
     CONF_HUMIDITY_SENSOR,
     CONF_MAX_OPENING,
+    CONF_MAX_SOLAR_KW,
     CONF_MIN_OPENING,
     CONF_MIN_TOTAL,
     CONF_MIN_ZONES,
@@ -47,21 +51,26 @@ from .const import (
     CONF_PRIORITY,
     CONF_SLEEP_ZONE,
     CONF_SOLAR_EXPORT_NEGATIVE,
+    CONF_SOLAR_POWER_SENSOR,
     CONF_SOLAR_SENSOR,
     CONF_SPILL,
     CONF_TEMP_SENSOR,
     CONF_UNIT_ID,
+    CONF_VENT_MIN_BATTERY,
     CONF_WEATHER,
     CONF_WINDOW_DELAY,
     CONF_WINDOW_SENSORS,
     CONF_ZONE,
     DEFAULT_DISMISS_MINUTES,
     DEFAULT_DOOR_DELAY,
+    DEFAULT_MAX_SOLAR_KW,
     DEFAULT_PRESENCE_HOLD,
     DEFAULT_SLEEP_TARGET,
+    DEFAULT_VENT_MIN_BATTERY,
     DEFAULT_WINDOW_DELAY,
     DOMAIN,
     FORECAST_REFRESH_MINUTES,
+    JOURNAL_IN_FEED,
     WS_SCHEMA_VERSION,
 )
 from .core.model import Command
@@ -73,11 +82,13 @@ from .logic.comfort import (
     deciding_zones,
     house_band,
     house_demand,
+    in_night,
     indoor_temperature,
     zone_band,
     zone_demand,
     zone_weight,
 )
+from .logic.energy import EnergyMemory, EnergyMode, EnergySetting, resolve
 from .logic.guard import (
     GuardConfig,
     GuardState,
@@ -88,6 +99,7 @@ from .logic.guard import (
     record,
 )
 from .logic.health import DampTracker, assess
+from .logic.journal import Journal, JournalEntry, Kind
 from .logic.openings import OpeningMemory, openings_command
 from .logic.outlook import outlook
 from .logic.planner import Plan, periods, precondition_blocks
@@ -99,6 +111,7 @@ from .logic.snapshot import (
     ZoneInputs,
 )
 from .logic.thermal import ThermalModel, ThermalSample
+from .logic.trend import TrendTracker
 from .ws import signal_update
 
 if TYPE_CHECKING:
@@ -111,9 +124,18 @@ _LOGGER = logging.getLogger(__name__)
 PRESENCE_ZONING = "presence_zoning"
 ROOM_BALANCING = "room_balancing"
 WEATHER_PRECONDITION = "weather_precondition"
-SOLAR_SHIFT = "solar_shift"
 SLEEP_MODE = "sleep_mode"
-BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING, WEATHER_PRECONDITION, SOLAR_SHIFT, SLEEP_MODE)
+BEHAVIOURS = (PRESENCE_ZONING, ROOM_BALANCING, WEATHER_PRECONDITION, SLEEP_MODE)
+# Gone in 0.7: the energy mode does its job.
+SOLAR_SHIFT = "solar_shift"
+BEHAVIOUR_NAMES = {
+    PRESENCE_ZONING: "Presence zoning",
+    ROOM_BALANCING: "Climate Butler",
+    WEATHER_PRECONDITION: "Weather pre-conditioning",
+    SLEEP_MODE: "Bedtime",
+}
+HISTORY_MINUTES = 120  # each room's sparkline on the card
+HISTORY_STEP = 5
 SAMPLE_EVERY = timedelta(minutes=5)
 SAVE_EVERY = timedelta(minutes=30)
 STORE_VERSION = 1
@@ -157,6 +179,8 @@ def settings_from_options(options: dict[str, Any]) -> ComfortSettings:
         night_end=_time(options.get(CONF_NIGHT_END), base.night_end),
         min_open_zones=int(options.get(CONF_MIN_ZONES, base.min_open_zones)),
         min_total_opening=int(options.get(CONF_MIN_TOTAL, base.min_total_opening)),
+        max_solar_w=float(options.get(CONF_MAX_SOLAR_KW, DEFAULT_MAX_SOLAR_KW)) * 1000,
+        vent_min_battery=float(options.get(CONF_VENT_MIN_BATTERY, DEFAULT_VENT_MIN_BATTERY)),
     )
 
 
@@ -185,9 +209,18 @@ class ComfortManager:
         self._last_run: dict[str, datetime] = {}
         self.models: dict[str, ThermalModel] = {}
         self.plans: dict[str, Plan] = {}
+        self.trends: dict[str, TrendTracker] = {}
+        self.journals: dict[str, Journal] = {}
+        self.energy_settings: dict[str, EnergySetting] = {}
+        # The energy mode in use for each unit, and why.
+        self.energy: dict[str, tuple[EnergyMode, str]] = {}
+        self._energy_memory: dict[str, EnergyMemory] = {}
         self._samples: dict[str, tuple[datetime, ThermalSample]] = {}
         self._saved_at: datetime | None = None
         self._store: Store = Store(hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.thermal")
+        self._journal_store: Store = Store(
+            hass, STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.journal"
+        )
         self._forecast: tuple[ForecastPoint, ...] = ()
         self._forecast_at: datetime | None = None
         self._listeners: list[Callable[[], None]] = []
@@ -206,8 +239,10 @@ class ComfortManager:
                 async_track_state_change_event(self.hass, watched, self._on_input_change)
             )
         stored = await self._store.async_load() or {}
+        history = await self._journal_store.async_load() or {}
         for unit_id in self.coordinator.units:
             self.models[unit_id] = ThermalModel.from_dict(stored.get(unit_id))
+            self.journals[unit_id] = Journal.from_list(history.get(unit_id))
         self._unsubs.append(self.coordinator.async_add_listener(self._on_unit_update))
         self._unsubs.append(self.coordinator.async_add_command_listener(self._on_command))
         for unit_id in self.coordinator.units:
@@ -231,7 +266,14 @@ class ComfortManager:
     def _watched_entities(self) -> list[str]:
         options = self.entry.options
         ids: list[str] = []
-        for key in (CONF_OUTDOOR_SENSOR, CONF_SOLAR_SENSOR, CONF_WEATHER):
+        for key in (
+            CONF_OUTDOOR_SENSOR,
+            CONF_SOLAR_SENSOR,
+            CONF_SOLAR_POWER_SENSOR,
+            CONF_BATTERY_POWER_SENSOR,
+            CONF_BATTERY_SOC_SENSOR,
+            CONF_WEATHER,
+        ):
             if options.get(key):
                 ids.append(options[key])
         ids.extend(options.get(CONF_PEOPLE) or [])
@@ -252,6 +294,34 @@ class ComfortManager:
     def _guard(self, unit_id: str) -> GuardState:
         return self._guards.setdefault(unit_id, GuardState())
 
+    def journal(self, unit_id: str) -> Journal:
+        """Return a unit's journal of what the Climate Butler did and why."""
+        return self.journals.setdefault(unit_id, Journal())
+
+    def _note(self, unit_id: str, kind: Kind, headline: str, reason: str = "") -> None:
+        self.journal(unit_id).add(JournalEntry(dt_util.now(), kind, headline, reason))
+
+    def _zone_names(self, unit_id: str) -> dict[int, str]:
+        snapshot = self.snapshots.get(unit_id)
+        return {z.zone: z.name for z in snapshot.zones} if snapshot else {}
+
+    def _note_hold(self, unit_id: str, changed: list[str], where: str) -> None:
+        """Note a person's change autopilot now leaves alone for a while."""
+        names = self._zone_names(unit_id)
+        things = [
+            "the unit" if c == "unit" else "the fan" if c == "fan" else names.get(int(c[4:]), c)
+            for c in changed
+        ]
+        until = dt_util.as_local(dt_util.utcnow() + self.guard_config.override_hold)
+        listed = things[0] if len(things) == 1 else ", ".join(things[:-1]) + " and " + things[-1]
+        self._note(
+            unit_id,
+            Kind.HOLD,
+            "Leaving your change alone",
+            f"{listed[0].upper()}{listed[1:]} changed {where}: left as you set "
+            f"{'it' if len(things) == 1 else 'them'} until {until:%H:%M}.",
+        )
+
     def autopilot_on(self, unit_id: str) -> bool:
         """Return True when any autopilot behaviour is enabled for the unit."""
         return any(self.autopilot.get(unit_id, {}).values())
@@ -268,6 +338,17 @@ class ComfortManager:
             note_command(self._guard(unit_id), command, dt_util.utcnow())
         elif self.autopilot_on(unit_id):
             manual_command(self.guard_config, self._guard(unit_id), command, dt_util.utcnow())
+            changed = (
+                ["unit"]
+                if command.power is not None
+                or command.mode is not None
+                or command.target_temp is not None
+                else []
+            )
+            changed += ["fan"] if command.fan_speed is not None else []
+            changed += [f"zone{n}" for n in command.zones]
+            if changed:
+                self._note_hold(unit_id, changed, "in Home Assistant")
 
     @callback
     def _on_unit_update(self) -> None:
@@ -288,6 +369,7 @@ class ComfortManager:
                     paused.remove(f"zone{number}")
             if paused:
                 _LOGGER.debug("Autopilot paused for %s after a manual change: %s", unit_id, paused)
+                self._note_hold(unit_id, paused, "in the app or on the wall controller")
         self._schedule()
 
     @callback
@@ -305,6 +387,7 @@ class ComfortManager:
     async def _async_save(self) -> None:
         self._saved_at = dt_util.utcnow()
         await self._store.async_save({uid: m.as_dict() for uid, m in self.models.items()})
+        await self._journal_store.async_save({uid: j.as_list() for uid, j in self.journals.items()})
 
     def _learn(self) -> None:
         """Feed a five-minute sample of every unit into its thermal model."""
@@ -320,16 +403,40 @@ class ComfortManager:
                 running=snapshot.unit.power,
                 mode=snapshot.unit.mode,
                 shares={z.zone: (z.opening / total if z.on else 0.0) for z in snapshot.zones},
+                night=in_night(snapshot),
             )
             previous = self._samples.get(unit_id)
             if previous is None or now - previous[0] >= SAMPLE_EVERY:
                 if previous is not None:
                     minutes = (now - previous[0]).total_seconds() / 60
                     if minutes <= 20:
-                        self.models.setdefault(unit_id, ThermalModel()).learn(
-                            previous[1], sample, minutes
-                        )
+                        model = self.models.setdefault(unit_id, ThermalModel())
+                        model.learn(previous[1], sample, minutes)
+                        self._note_learned(unit_id, model)
                 self._samples[unit_id] = (now, sample)
+
+    def _note_learned(self, unit_id: str, model: ThermalModel) -> None:
+        """Tell the journal what was learned about a room's own warmth or chill."""
+        names = self._zone_names(unit_id)
+        for zone, night, bias in model.news():
+            name = names.get(zone, f"Zone {zone}")
+            when = "at night" if night else "by day"
+            hourly = abs(bias) * 60
+            if bias > 0:
+                headline = f"Learned: {name} keeps itself warm {when}"
+                reason = (
+                    f"{name} stays about {hourly:.1f} °C an hour warmer {when} than outside "
+                    "explains (people, sun or devices). It will not be left to cool on its own "
+                    "for long."
+                )
+            else:
+                headline = f"Learned: {name} loses heat fast {when}"
+                reason = (
+                    f"{name} cools about {hourly:.1f} °C an hour faster {when} than outside "
+                    "explains (a draught, or a window left open?). It will not be left to warm "
+                    "up on its own for long."
+                )
+            self._note(unit_id, Kind.LEARN, headline, reason)
 
     # Listeners --------------------------------------------------------------------
 
@@ -407,15 +514,28 @@ class ComfortManager:
         left = max(s.last_changed for s in states)
         return False, (dt_util.utcnow() - left).total_seconds() / 60
 
-    def _solar_export(self) -> float | None:
-        state = self.hass.states.get(self.entry.options.get(CONF_SOLAR_SENSOR, ""))
+    def _power(self, option: str) -> float | None:
+        """Return a power sensor's reading in watts."""
+        state = self.hass.states.get(self.entry.options.get(option, ""))
         value = _float(state)
         if value is None or state is None:
             return None
-        value *= POWER_SCALE.get(state.attributes.get("unit_of_measurement"), 1.0)
+        return value * POWER_SCALE.get(state.attributes.get("unit_of_measurement"), 1.0)
+
+    def _solar_export(self) -> float | None:
+        value = self._power(CONF_SOLAR_SENSOR)
+        if value is None:
+            return None
         if self.entry.options.get(CONF_SOLAR_EXPORT_NEGATIVE, True):
             value = -value
         return max(0.0, value)
+
+    def _battery(self) -> float | None:
+        """Return battery power in watts, positive while charging."""
+        value = self._power(CONF_BATTERY_POWER_SENSOR)
+        if value is None:
+            return None
+        return -value if self.entry.options.get(CONF_BATTERY_CHARGING_NEGATIVE, True) else value
 
     def _zone_inputs(self, unit_id: str) -> tuple[ZoneInputs, ...]:
         state = self.coordinator.state(unit_id)
@@ -519,6 +639,7 @@ class ComfortManager:
             return None
         info = self.coordinator.units[unit_id]
         anyone_home, away_minutes = self._presence()
+        options = self.entry.options
         return HouseSnapshot(
             now=dt_util.now(),
             unit_name=info.name,
@@ -531,6 +652,13 @@ class ComfortManager:
             anyone_home=anyone_home,
             away_minutes=away_minutes,
             solar_export_w=self._solar_export(),
+            solar_w=(
+                max(0.0, solar)
+                if (solar := self._power(CONF_SOLAR_POWER_SENSOR)) is not None
+                else None
+            ),
+            battery_w=self._battery(),
+            battery_soc=_float(self.hass.states.get(options.get(CONF_BATTERY_SOC_SENSOR, ""))),
             guest_mode=self.guest_modes.get(unit_id, False),
             sleep_mode=bool(self.autopilot.get(unit_id, {}).get(SLEEP_MODE)),
             sleep_target=self.sleep_targets.get(unit_id, DEFAULT_SLEEP_TARGET),
@@ -549,14 +677,12 @@ class ComfortManager:
             self._damp.setdefault(unit_id, DampTracker()).observe(
                 snapshot.now, snapshot.zones, snapshot.outdoor_temp, snapshot.unit_humidity
             )
+            self.trends.setdefault(unit_id, TrendTracker()).observe(snapshot)
+            self._resolve_energy(unit_id, snapshot)
             model = self.models.setdefault(unit_id, ThermalModel())
-            solar = self.plans.get(unit_id)
-            solar_blocks = [b for b in (solar.blocks if solar else []) if b.kind == "solar"]
             try:
                 self.plans[unit_id] = Plan(
-                    blocks=precondition_blocks(snapshot, model)
-                    + [b for b in solar_blocks if b.end > snapshot.now],
-                    periods=periods(snapshot),
+                    blocks=precondition_blocks(snapshot, model), periods=periods(snapshot)
                 )
             except Exception:
                 # A bad input must not stop advice and autopilot; plan without it.
@@ -570,6 +696,18 @@ class ComfortManager:
         for listener in list(self._listeners):
             listener()
         async_dispatcher_send(self.hass, signal_update(self.entry.entry_id))
+
+    def _resolve_energy(self, unit_id: str, snapshot: HouseSnapshot) -> None:
+        """Pick the energy mode for now, and note it when it changes."""
+        before = self.energy.get(unit_id)
+        mode, reason = resolve(
+            snapshot,
+            self.energy_settings.get(unit_id, EnergySetting.AUTO),
+            self._energy_memory.setdefault(unit_id, EnergyMemory()),
+        )
+        self.energy[unit_id] = (mode, reason)
+        if before is not None and before[0] is not mode:
+            self._note(unit_id, Kind.ENERGY, f"Energy: {mode.value.capitalize()}", reason)
 
     async def _async_autopilot(self, unit_id: str) -> None:
         """Let the autopilot engine decide, within the guard rails."""
@@ -588,29 +726,38 @@ class ComfortManager:
         paused = {n for n in guard.zone_paused_until if guard.zone_paused(n, now)}
         plan = self.plans.get(unit_id) or Plan()
         memory = self._memory.setdefault(unit_id, AutopilotMemory())
+        energy = self.energy.get(unit_id, (EnergyMode.MID, ""))[0]
         decision = decide(
             snapshot,
             Switches(
                 presence=enabled.get(PRESENCE_ZONING, False),
                 balancing=enabled.get(ROOM_BALANCING, False),
                 weather=enabled.get(WEATHER_PRECONDITION, False),
-                solar=enabled.get(SOLAR_SHIFT, False),
                 sleep=enabled.get(SLEEP_MODE, False),
+                energy=energy,
             ),
             plan.blocks,
             self.models.setdefault(unit_id, ThermalModel()),
             memory,
             paused,
             minutes,
+            self.trends.get(unit_id),
         )
         self.decisions[unit_id] = decision
-        plan.blocks = [b for b in plan.blocks if b.kind != "solar"] + (
-            [decision.solar_block] if decision.solar_block else []
-        )
         # Open windows and doors win over everything else for their zones.
         openings = openings_command(snapshot, self._openings.setdefault(unit_id, OpeningMemory()))
         command = decision.command.merge(openings)
-        await self._async_send_autopilot(unit_id, snapshot, guard, command, now, decision.reason)
+        sent = await self._async_send_autopilot(
+            unit_id, snapshot, guard, command, now, decision.reason
+        )
+        self.journal(unit_id).observe(
+            snapshot.now,
+            decision.activity.value if decision.activity else None,
+            decision.headline,
+            decision.reason,
+            sent,
+            {z.zone: z.name for z in snapshot.zones},
+        )
 
     async def _async_send_autopilot(
         self,
@@ -620,15 +767,16 @@ class ComfortManager:
         command: Command,
         now: datetime,
         reason: str = "",
-    ) -> None:
+    ) -> Command | None:
+        """Send what the guard allows; return it, or None when nothing went out."""
         allowed = filter_command(self.guard_config, guard, snapshot, command, now)
         if allowed is None:
-            return
+            return None
         try:
             await self.coordinator.async_send(unit_id, allowed, source="autopilot")
         except HomeAssistantError as err:
             _LOGGER.warning("Autopilot could not send %s: %s", allowed, err)
-            return
+            return None
         record(guard, allowed, now)
         memory = self._memory.setdefault(unit_id, AutopilotMemory())
         note_sent(memory, allowed, now, snapshot.unit.mode)
@@ -637,23 +785,78 @@ class ComfortManager:
             "action": command_as_dict(allowed),
             "reason": reason,
         }
+        return allowed
 
-    async def async_set_autopilot(self, unit_id: str, behaviour: str, enabled: bool) -> None:
-        """Turn an autopilot behaviour on or off."""
+    async def async_set_autopilot(
+        self, unit_id: str, behaviour: str, enabled: bool, restoring: bool = False
+    ) -> None:
+        """Turn an autopilot behaviour on or off.
+
+        Switching one on hands the unit over: holds left by earlier manual
+        changes end, so the Butler can act at once.
+        """
+        was = self.autopilot.get(unit_id, {}).get(behaviour, False)
         self.autopilot.setdefault(unit_id, {})[behaviour] = enabled
+        if enabled and not restoring:
+            guard = self._guard(unit_id)
+            guard.unit_paused_until = guard.fan_paused_until = None
+        if not restoring and enabled != was:
+            label = BEHAVIOUR_NAMES.get(behaviour, behaviour)
+            reason = ""
+            if behaviour == SLEEP_MODE and enabled:
+                target = self.sleep_targets.get(unit_id, DEFAULT_SLEEP_TARGET)
+                reason = f"Holding the bedroom within half a degree of {target:g} °C."
+            self._note(unit_id, Kind.SWITCH, f"{label} {'on' if enabled else 'off'}", reason)
         # What each room is aiming for has changed: decide afresh, and straight away,
         # keeping only what the lighter behaviours need to put things back.
         old = self._memory.pop(unit_id, None)
         if old is not None:
             self._memory[unit_id] = AutopilotMemory(
-                solar=old.solar,
                 presence=old.presence,
                 health_started=old.health_started,
                 mode_at=old.mode_at,
+                mode_changed_at=old.mode_changed_at,
                 last_mode=old.last_mode,
             )
         self._last_run.pop(unit_id, None)
         await self._async_evaluate()
+
+    async def async_set_energy(
+        self, unit_id: str, setting: EnergySetting, restoring: bool = False
+    ) -> None:
+        """Choose the energy mode, or Auto to follow the solar and battery sensors."""
+        before = self.energy_settings.get(unit_id, EnergySetting.AUTO)
+        self.energy_settings[unit_id] = setting
+        if restoring or setting is before:
+            return
+        self._note(unit_id, Kind.SWITCH, f"Energy set to {setting.value.capitalize()}")
+        if unit_id in self._memory:
+            self._memory[unit_id].fresh = True
+        self._last_run.pop(unit_id, None)
+        await self._async_evaluate()
+
+    def butler_state(self, unit_id: str) -> str:
+        """Return what the Climate Butler is doing in one word, for its sensor."""
+        if not self.autopilot_on(unit_id):
+            return "off"
+        if self._guard(unit_id).unit_paused(dt_util.utcnow()):
+            return "paused"
+        decision = self.decisions.get(unit_id)
+        return decision.activity.value if decision and decision.activity else "rest"
+
+    def energy_status(self, unit_id: str) -> dict[str, Any]:
+        """Return the energy setting, the mode in use and why, and the power readings."""
+        snapshot = self.snapshots.get(unit_id)
+        mode, reason = self.energy.get(unit_id, (EnergyMode.MID, ""))
+        return {
+            "setting": self.energy_settings.get(unit_id, EnergySetting.AUTO).value,
+            "mode": mode.value,
+            "reason": reason,
+            "export_w": snapshot.solar_export_w if snapshot else None,
+            "solar_w": snapshot.solar_w if snapshot else None,
+            "battery_w": snapshot.battery_w if snapshot else None,
+            "battery_soc": snapshot.battery_soc if snapshot else None,
+        }
 
     async def async_set_sleep_target(self, unit_id: str, value: float) -> None:
         """Set the temperature sleep mode holds the sleep zones at."""
@@ -777,6 +980,7 @@ class ComfortManager:
         decision = self.decisions.get(unit_id)
         health = decision.health if decision else assess(snapshot)
         view = decision.outlook if decision else outlook(snapshot)
+        trend = self.trends.get(unit_id)
         zones = []
         for zone in snapshot.zones:
             zband = zone_band(snapshot, zone)
@@ -805,6 +1009,15 @@ class ComfortManager:
                     "role": role.value
                     if decision and (role := decision.roles.get(zone.zone))
                     else None,
+                    # What autopilot aims the room at now, and how fast it is moving (°C an hour).
+                    "aim": decision.aims.get(zone.zone) if decision else None,
+                    "rate": round(rate, 2)
+                    if trend and (rate := trend.rate(zone.zone)) is not None
+                    else None,
+                    # The last two hours, every five minutes, oldest first.
+                    "history": trend.series(zone.zone, snapshot.now, HISTORY_MINUTES, HISTORY_STEP)
+                    if trend and zone.has_sensor
+                    else [],
                     "health": zhealth.as_dict() if zhealth else None,
                     "entities": {
                         "damper": entity_id("cover", f"{unit_id}_zone{zone.zone}_damper"),
@@ -824,6 +1037,8 @@ class ComfortManager:
                     "advice": entity_id("sensor", f"{unit_id}_advice"),
                     "guest_mode": entity_id("switch", f"{unit_id}_guest_mode"),
                     "sleep_target": entity_id("number", f"{unit_id}_sleep_target"),
+                    "energy_mode": entity_id("select", f"{unit_id}_energy_mode"),
+                    "butler": entity_id("sensor", f"{unit_id}_climate_butler"),
                     **{b: entity_id("switch", f"{unit_id}_{b}") for b in BEHAVIOURS},
                 },
                 # The unit's own features (Powerful, Eco, Health...) and the entity that
@@ -875,6 +1090,7 @@ class ComfortManager:
                 "guest_mode": snapshot.guest_mode,
                 "sleep_mode": snapshot.sleep_mode,
                 "sleep_target": snapshot.sleep_target,
+                "energy": self.energy_status(unit_id),
             },
             "forecast": [
                 {"time": p.time.isoformat(), "temperature": p.temperature, "condition": p.condition}
@@ -882,7 +1098,12 @@ class ComfortManager:
             ],
             "advice": [rec.as_dict() for rec in self.advice.get(unit_id, [])],
             "forecast_hours": len(snapshot.forecast),
-            "autopilot": self.autopilot_status(unit_id),
+            "autopilot": {
+                **self.autopilot_status(unit_id),
+                "state": self.butler_state(unit_id),
+                # The latest entries of what the Butler did and why, newest first.
+                "journal": [e.as_dict() for e in self.journal(unit_id).recent(JOURNAL_IN_FEED)],
+            },
             "plan": {
                 **(self.plans.get(unit_id) or Plan()).as_dict(),
                 "model": {

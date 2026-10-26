@@ -158,11 +158,19 @@ async def test_inputs_options_and_websocket(hass: HomeAssistant, hass_ws_client)
     assert event["unit"]["entities"]["guest_mode"] == "switch.demo_ducted_unit_guest_mode"
     assert event["unit"]["features_entities"]["powerful"] == "switch.demo_ducted_unit_powerful"
     assert event["unit"]["features_entities"]["sleep"] == "select.demo_ducted_unit_sleep"
-    assert event["unit"]["entities"]["room_balancing"] == (
-        "switch.demo_ducted_unit_autopilot_room_balancing"
+    assert event["unit"]["entities"]["room_balancing"] == "switch.demo_ducted_unit_climate_butler"
+    assert event["unit"]["entities"]["energy_mode"] == "select.demo_ducted_unit_energy"
+    assert event["unit"]["entities"]["butler"] == (
+        "sensor.demo_ducted_unit_climate_butler_activity"
     )
+    assert "solar_shift" not in event["unit"]["entities"]
     assert event["house"]["outdoor"] == 31.5
     assert event["house"]["solar_export_w"] == 2400
+    assert event["house"]["energy"]["mode"] == "max"  # exporting: comfort comes first
+    assert event["house"]["energy"]["setting"] == "auto"
+    assert event["autopilot"]["state"] == "off"
+    assert isinstance(event["autopilot"]["journal"], list)
+    assert isinstance(event["zones"][0]["history"], list)
     assert event["house"]["anyone_home"] is True
     assert len(event["zones"]) == 3
     assert event["zones"][0]["entities"]["damper"] == "cover.master"
@@ -224,4 +232,4 @@ async def test_forecast_drives_the_plan(hass: HomeAssistant) -> None:
     kinds = {b["kind"] for b in payload["plan"]["blocks"]}
     assert "preheat" in kinds  # a freezing night ahead of a cool house
     assert payload["plan"]["periods"]
-    assert hass.states.get("switch.demo_ducted_unit_autopilot_weather_pre_conditioning")
+    assert hass.states.get("switch.demo_ducted_unit_climate_butler_weather_pre_conditioning")

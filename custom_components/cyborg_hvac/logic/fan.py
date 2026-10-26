@@ -34,6 +34,11 @@ def _nearest(speeds: tuple[str, ...], wanted: str) -> str | None:
     return min(fixed, key=lambda f: abs(_rank(f) - _rank(wanted)))
 
 
+def vent_fan(s: HouseSnapshot, wanted: str) -> str | None:
+    """Return the fan speed closest to ``wanted`` for fan-only, which has no auto."""
+    return _nearest(s.caps.fan_speeds, wanted)
+
+
 def choose_fan(
     s: HouseSnapshot,
     mode: HvacMode | None,
@@ -44,8 +49,14 @@ def choose_fan(
     peak: bool,
     open_total: int,
     open_count: int,
+    pull_down: float = PULL_DOWN,
+    sleep_boost: float = SLEEP_BOOST,
 ) -> str | None:
-    """Return the fan speed for this moment, or None to leave it to the unit."""
+    """Return the fan speed for this moment, or None to leave it to the unit.
+
+    ``pull_down`` and ``sleep_boost`` are the degrees short before the fan picks up;
+    the energy mode and Bedtime set them.
+    """
     speeds = s.caps.fan_speeds
     if not speeds or mode not in (HvacMode.HEAT, HvacMode.COOL):
         return None
@@ -54,8 +65,8 @@ def choose_fan(
     if mode is HvacMode.COOL and humid:
         wanted = "low"
     elif s.sleep_mode:
-        wanted = "medium" if shortfall >= SLEEP_BOOST - margin else "low"
-    elif peak or shortfall >= PULL_DOWN - (HYSTERESIS if current == "high" else 0.0):
+        wanted = "medium" if shortfall >= sleep_boost - margin else "low"
+    elif peak or shortfall >= pull_down - (HYSTERESIS if current == "high" else 0.0):
         wanted = "high"
     else:
         wanted = FAN_AUTO

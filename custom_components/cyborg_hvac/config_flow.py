@@ -30,6 +30,9 @@ from .const import (
     BRAND_HISENSE,
     CONF_ACCOUNT_ID,
     CONF_AREA,
+    CONF_BATTERY_CHARGING_NEGATIVE,
+    CONF_BATTERY_POWER_SENSOR,
+    CONF_BATTERY_SOC_SENSOR,
     CONF_BRAND,
     CONF_COOL_AWAY,
     CONF_COOL_DAY,
@@ -44,6 +47,7 @@ from .const import (
     CONF_HUMIDITY_MAX,
     CONF_HUMIDITY_SENSOR,
     CONF_MAX_OPENING,
+    CONF_MAX_SOLAR_KW,
     CONF_MIN_OPENING,
     CONF_MIN_TOTAL,
     CONF_MIN_ZONES,
@@ -58,19 +62,23 @@ from .const import (
     CONF_SCAN_INTERVAL,
     CONF_SLEEP_ZONE,
     CONF_SOLAR_EXPORT_NEGATIVE,
+    CONF_SOLAR_POWER_SENSOR,
     CONF_SOLAR_SENSOR,
     CONF_SOURCE_ID,
     CONF_SPILL,
     CONF_TEMP_SENSOR,
     CONF_TOKEN,
     CONF_UNIT_ID,
+    CONF_VENT_MIN_BATTERY,
     CONF_WEATHER,
     CONF_WINDOW_DELAY,
     CONF_WINDOW_SENSORS,
     CONF_ZONE,
     DEFAULT_DOOR_DELAY,
+    DEFAULT_MAX_SOLAR_KW,
     DEFAULT_PRESENCE_HOLD,
     DEFAULT_SCAN_INTERVAL,
+    DEFAULT_VENT_MIN_BATTERY,
     DEFAULT_WINDOW_DELAY,
     DOMAIN,
     SUBENTRY_ZONE,
@@ -570,6 +578,12 @@ class CyborgHvacOptionsFlow(OptionsFlow):
             CONF_PEOPLE,
             CONF_SOLAR_SENSOR,
             CONF_SOLAR_EXPORT_NEGATIVE,
+            CONF_SOLAR_POWER_SENSOR,
+            CONF_BATTERY_POWER_SENSOR,
+            CONF_BATTERY_CHARGING_NEGATIVE,
+            CONF_BATTERY_SOC_SENSOR,
+            CONF_MAX_SOLAR_KW,
+            CONF_VENT_MIN_BATTERY,
             CONF_WINDOW_DELAY,
             CONF_DOOR_DELAY,
             CONF_MIN_ZONES,
@@ -589,6 +603,34 @@ class CyborgHvacOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(CONF_SOLAR_SENSOR): _entity("sensor", "power"),
                 vol.Optional(CONF_SOLAR_EXPORT_NEGATIVE, default=True): selector.BooleanSelector(),
+                vol.Optional(CONF_SOLAR_POWER_SENSOR): _entity("sensor", "power"),
+                vol.Optional(CONF_BATTERY_POWER_SENSOR): _entity("sensor", "power"),
+                vol.Optional(
+                    CONF_BATTERY_CHARGING_NEGATIVE, default=True
+                ): selector.BooleanSelector(),
+                vol.Optional(CONF_BATTERY_SOC_SENSOR): _entity("sensor", "battery"),
+                vol.Optional(CONF_MAX_SOLAR_KW, default=DEFAULT_MAX_SOLAR_KW): (
+                    selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0.5,
+                            max=50,
+                            step=0.5,
+                            unit_of_measurement="kW",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    )
+                ),
+                vol.Optional(CONF_VENT_MIN_BATTERY, default=DEFAULT_VENT_MIN_BATTERY): (
+                    selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=5,
+                            unit_of_measurement="%",
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    )
+                ),
                 vol.Optional(CONF_WINDOW_DELAY, default=DEFAULT_WINDOW_DELAY): _minutes(30),
                 vol.Optional(CONF_DOOR_DELAY, default=DEFAULT_DOOR_DELAY): _minutes(60),
                 vol.Optional(CONF_MIN_ZONES, default=2): selector.NumberSelector(
