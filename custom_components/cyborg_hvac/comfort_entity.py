@@ -9,13 +9,16 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.components.number import NumberMode, RestoreNumber
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.select import SelectEntity
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import UnitOfTemperature
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import CONF_PRESENCE_SENSORS, DEFAULT_SLEEP_TARGET
 from .entity import CyborgEntity, CyborgZoneEntity
+from .logic.autopilot import Activity
+from .logic.energy import EnergySetting
 
 
 class _ComfortMixin:
@@ -108,7 +111,9 @@ class AutopilotSwitch(_ComfortMixin, CyborgEntity, SwitchEntity, RestoreEntity):
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
         if last is not None and last.state == "on":
-            await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, True)
+            await self.comfort.async_set_autopilot(
+                self._unit_id, self._behaviour, True, restoring=True
+            )
 
     @property
     def available(self) -> bool:
@@ -137,6 +142,84 @@ class AutopilotSwitch(_ComfortMixin, CyborgEntity, SwitchEntity, RestoreEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable the behaviour."""
         await self.comfort.async_set_autopilot(self._unit_id, self._behaviour, False)
+
+
+class EnergyModeSelect(_ComfortMixin, CyborgEntity, SelectEntity, RestoreEntity):
+    """How much comfort is worth: Auto follows the solar and battery sensors."""
+
+    _attr_translation_key = "energy_mode"
+
+    def __init__(self, coordinator, unit_id: str) -> None:
+        """Bind to a unit."""
+        super().__init__(coordinator, unit_id, "energy_mode")
+        self._attr_options = [s.value for s in EnergySetting]
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the last choice."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state in self._attr_options:
+            await self.comfort.async_set_energy(
+                self._unit_id, EnergySetting(last.state), restoring=True
+            )
+
+    @property
+    def available(self) -> bool:
+        """Settable even while the unit is offline."""
+        return True
+
+    @property
+    def current_option(self) -> str:
+        """Return the chosen setting."""
+        return self.comfort.energy_settings.get(self._unit_id, EnergySetting.AUTO).value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show the mode in use and why."""
+        status = self.comfort.energy_status(self._unit_id)
+        return {"active": status["mode"], "reason": status["reason"]}
+
+    async def async_select_option(self, option: str) -> None:
+        """Choose a setting."""
+        await self.comfort.async_set_energy(self._unit_id, EnergySetting(option))
+
+
+BUTLER_STATES = [*(a.value for a in Activity), "paused", "off"]
+
+
+class ButlerSensor(_ComfortMixin, CyborgEntity, SensorEntity):
+    """What the Climate Butler is doing, in one word; history keeps every change."""
+
+    _attr_translation_key = "climate_butler"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = BUTLER_STATES
+
+    def __init__(self, coordinator, unit_id: str) -> None:
+        """Bind to a unit."""
+        super().__init__(coordinator, unit_id, "climate_butler")
+
+    @property
+    def available(self) -> bool:
+        """Available while the unit reports in, or says it is offline."""
+        return self.coordinator.last_update_success
+
+    @property
+    def native_value(self) -> str:
+        """Return what the Butler is doing."""
+        return self.comfort.butler_state(self._unit_id)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Show the headline, the reason and the rooms being watched."""
+        decision = self.comfort.decisions.get(self._unit_id)
+        energy = self.comfort.energy_status(self._unit_id)
+        return {
+            "headline": decision.headline if decision else None,
+            "reason": decision.reason if decision else None,
+            "watching": [w.name for w in decision.watch] if decision else [],
+            "energy": energy["mode"],
+            "energy_reason": energy["reason"],
+        }
 
 
 class SleepTargetNumber(_ComfortMixin, CyborgEntity, RestoreNumber):

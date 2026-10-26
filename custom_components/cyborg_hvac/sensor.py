@@ -21,7 +21,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .comfort_entity import AdviceSensor
+from .comfort_entity import AdviceSensor, ButlerSensor
 from .coordinator import CyborgRuntimeData
 from .core.model import Capabilities, SensorKind
 from .entity import CyborgEntity, CyborgZoneEntity, zone_subentries
@@ -82,6 +82,7 @@ async def async_setup_entry(
         if description.kind in info.capabilities.sensors
     )
     async_add_entities(AdviceSensor(coordinator, unit_id) for unit_id in coordinator.units)
+    async_add_entities(ButlerSensor(coordinator, unit_id) for unit_id in coordinator.units)
     for subentry in zone_subentries(coordinator):
         if coordinator.units[subentry.data["unit_id"]].capabilities.zone_temperatures:
             async_add_entities(

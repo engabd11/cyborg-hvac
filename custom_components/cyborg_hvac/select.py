@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .comfort_entity import EnergyModeSelect
 from .coordinator import CyborgRuntimeData
 from .core.model import Command, Feature, FeatureKind
 from .entity import CyborgEntity
@@ -17,8 +18,9 @@ async def async_setup_entry(
     entry: ConfigEntry[CyborgRuntimeData],
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Add a select for every multi-choice feature."""
+    """Add a select for every multi-choice feature, and each unit's energy mode."""
     coordinator = entry.runtime_data.coordinator
+    async_add_entities(EnergyModeSelect(coordinator, unit_id) for unit_id in coordinator.units)
     async_add_entities(
         FeatureSelect(coordinator, unit_id, feature)
         for unit_id, info in coordinator.units.items()

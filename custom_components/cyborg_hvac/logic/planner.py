@@ -1,4 +1,4 @@
-"""The 24 hour plan: comfort periods, pre-conditioning and solar banking."""
+"""The 24 hour plan: comfort periods and pre-conditioning."""
 
 from __future__ import annotations
 
@@ -14,9 +14,6 @@ from .thermal import ThermalModel
 
 SAFETY_FACTOR = 1.25
 HOT_SPIKE_MARGIN = 8.0
-SOLAR_START_W = 1500.0
-SOLAR_STOP_W = 600.0
-BANK_DEGREES = 1.0
 HEATWAVE_LEAD = 2  # a heatwave pre-cool starts this many times earlier
 
 
@@ -24,7 +21,7 @@ HEATWAVE_LEAD = 2  # a heatwave pre-cool starts this many times earlier
 class PlanBlock:
     """A stretch of time where the plan wants the unit doing something."""
 
-    kind: str  # preheat, precool, solar
+    kind: str  # preheat, precool
     start: datetime
     end: datetime
     mode: HvacMode
@@ -45,14 +42,6 @@ class PlanBlock:
             "target": self.target,
             "reason": self.reason,
         }
-
-
-@dataclass(slots=True)
-class SolarMemory:
-    """Whether solar banking is running, and what to put back afterwards."""
-
-    active: bool = False
-    restore: Command | None = None
 
 
 @dataclass(slots=True)
@@ -128,7 +117,14 @@ def precondition_blocks(s: HouseSnapshot, model: ThermalModel) -> list[PlanBlock
             continue
         band = house_band(s, period)
         for zone in zones or ():
-            arriving = model.drift(zone.zone, zone.temperature, outdoors)  # type: ignore[arg-type]
+            # Arriving in the morning means drifting through the night.
+            night = period is Period.DAY
+            arriving = model.drift(
+                zone.zone,
+                zone.temperature,  # type: ignore[arg-type]
+                outdoors,
+                night,
+            )
             block = _lift(s, model, zone.zone, arriving, band, at, outdoors[-1], share, period)
             if block:
                 blocks.append(block)
@@ -229,7 +225,7 @@ def _lift(
 def precondition_command(s: HouseSnapshot, blocks: list[PlanBlock]) -> Command:
     """Return what an active pre-conditioning block asks the unit to do."""
     for block in blocks:
-        if block.kind == "solar" or not block.active(s.now):
+        if not block.active(s.now):
             continue
         unit = s.unit
         if unit.power and unit.mode is block.mode:
@@ -244,45 +240,3 @@ def precondition_command(s: HouseSnapshot, blocks: list[PlanBlock]) -> Command:
             return Command()  # someone chose another mode; do not fight it
         return Command(power=True, mode=block.mode, target_temp=block.target)
     return Command()
-
-
-def solar_command(s: HouseSnapshot, memory: SolarMemory) -> tuple[Command, PlanBlock | None]:
-    """Bank up to a degree of comfort while spare solar is exported."""
-    export = s.solar_export_w or 0.0
-    band = house_band(s)
-    indoor = indoor_temperature(s)
-    outdoor = s.outdoor_temp
-    unit = s.unit
-    if memory.active and (export < SOLAR_STOP_W or s.anyone_home is False):
-        memory.active = False
-        restore, memory.restore = memory.restore, None
-        return (restore or Command()), None
-    if memory.active:
-        mode = unit.mode or HvacMode.COOL
-        return Command(), solar_block(s, mode, unit.target_temp or band.middle)
-    if export < SOLAR_START_W or indoor is None or outdoor is None or s.anyone_home is False:
-        return Command(), None
-    if outdoor > band.high and HvacMode.COOL in s.caps.hvac_modes:
-        mode, target = HvacMode.COOL, max(band.low + 0.5, band.high - 1 - BANK_DEGREES)
-    elif outdoor < band.low and HvacMode.HEAT in s.caps.hvac_modes:
-        mode, target = HvacMode.HEAT, min(band.high - 0.5, band.low + 1 + BANK_DEGREES)
-    else:
-        return Command(), None
-    if unit.power and unit.mode not in (mode, None):
-        return Command(), None
-    target = s.caps.round_temp(target)
-    memory.active = True
-    memory.restore = Command(target_temp=unit.target_temp) if unit.power else Command(power=False)
-    return Command(power=True, mode=mode, target_temp=target), solar_block(s, mode, target)
-
-
-def solar_block(s: HouseSnapshot, mode: HvacMode, target: float) -> PlanBlock:
-    """Return the plan block that shows solar banking on the timeline."""
-    return PlanBlock(
-        "solar",
-        s.now,
-        s.now + timedelta(minutes=30),
-        mode,
-        target,
-        f"Exporting {(s.solar_export_w or 0) / 1000:.1f} kW: banking comfort while power is free.",
-    )

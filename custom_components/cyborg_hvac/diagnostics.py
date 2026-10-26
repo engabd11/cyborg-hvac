@@ -33,6 +33,7 @@ async def async_get_config_entry_diagnostics(
     units = []
     for index, (unit_id, info) in enumerate(coordinator.units.items(), start=1):
         state = coordinator.state(unit_id)
+        trend = comfort.trends.get(unit_id) if comfort else None
         units.append(
             {
                 "unit": index,
@@ -45,6 +46,16 @@ async def async_get_config_entry_diagnostics(
                 "raw_status": async_redact_data(dict(state.raw), TO_REDACT) if state else None,
                 # What autopilot is doing and why, to explain its choices in a bug report.
                 "autopilot": comfort.autopilot_status(unit_id) if comfort else None,
+                "energy": comfort.energy_status(unit_id) if comfort else None,
+                # How fast each room is moving now, in °C an hour.
+                "trend": {str(n): trend.rate(n) for n in trend.rooms} if trend else {},
+                # What was learned about each room: loss, own warmth by day and night.
+                "model": comfort.models[unit_id].as_dict()
+                if comfort and unit_id in comfort.models
+                else None,
+                "journal": [e.as_dict() for e in comfort.journal(unit_id).recent(40)]
+                if comfort
+                else [],
             }
         )
     return {

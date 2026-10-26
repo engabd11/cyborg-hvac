@@ -10,5 +10,5 @@
   "issue_tracker": "https://github.com/engabd11/cyborg-hvac/issues",
   "loggers": ["custom_components.cyborg_hvac"],
   "requirements": [],
-  "version": "0.6.1"
+  "version": "0.7.0"
 }

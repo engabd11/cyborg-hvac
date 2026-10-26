@@ -8,9 +8,10 @@ from homeassistant.components import websocket_api
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
-from .const import DOMAIN
+from .const import DOMAIN, JOURNAL_PAGE_MAX
 
 SIGNAL_UPDATE = f"{DOMAIN}_comfort_update_{{}}"
 
@@ -58,6 +59,7 @@ def async_register(hass: HomeAssistant) -> None:
     """Register the websocket commands once."""
     websocket_api.async_register_command(hass, ws_list)
     websocket_api.async_register_command(hass, ws_subscribe)
+    websocket_api.async_register_command(hass, ws_journal)
 
 
 @websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/list"})
@@ -115,3 +117,36 @@ def ws_subscribe(
     )
     connection.send_result(msg["id"])
     forward()
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): f"{DOMAIN}/journal",
+        vol.Optional("entry_id"): str,
+        vol.Optional("unit_id"): str,
+        vol.Optional("before"): str,
+        vol.Optional("limit", default=50): vol.All(int, vol.Range(min=1, max=JOURNAL_PAGE_MAX)),
+    }
+)
+@callback
+def ws_journal(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Return the Climate Butler's history, newest first, older than ``before`` if given."""
+    target = _resolve(hass, msg.get("entry_id"), msg.get("unit_id"))
+    if target is None:
+        connection.send_error(msg["id"], "not_found", "No Cyborg HVAC unit found")
+        return
+    entry_id, unit_id = target
+    before = dt_util.parse_datetime(msg["before"]) if msg.get("before") else None
+    if msg.get("before") and before is None:
+        connection.send_error(msg["id"], "invalid_format", "before must be an ISO date and time")
+        return
+    if before is not None and before.tzinfo is None:
+        before = before.replace(tzinfo=dt_util.get_default_time_zone())
+    entry = hass.config_entries.async_get_entry(entry_id)
+    comfort = entry.runtime_data.comfort  # type: ignore[union-attr]
+    entries = comfort.journal(unit_id).recent(msg["limit"], before)
+    connection.send_result(
+        msg["id"], {"unit_id": unit_id, "entries": [e.as_dict() for e in entries]}
+    )

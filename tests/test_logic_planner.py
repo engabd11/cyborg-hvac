@@ -4,13 +4,7 @@ from datetime import UTC, datetime, timedelta
 from cyborg_hvac.backends.demo.backend import demo_capabilities
 from cyborg_hvac.backends.demo.simulation import SimSystem
 from cyborg_hvac.core.model import Command, HvacMode, UnitState
-from cyborg_hvac.logic.planner import (
-    SolarMemory,
-    periods,
-    precondition_blocks,
-    precondition_command,
-    solar_command,
-)
+from cyborg_hvac.logic.planner import periods, precondition_blocks, precondition_command
 from cyborg_hvac.logic.snapshot import ForecastPoint, HouseSnapshot, ZoneInputs
 from cyborg_hvac.logic.thermal import ThermalModel, ThermalSample
 
@@ -102,21 +96,6 @@ def test_someone_choosing_another_mode_is_not_fought():
         unit=replace(s.unit, power=True, mode=HvacMode.FAN_ONLY),
     )
     assert precondition_command(busy, blocks) == Command()
-
-
-def test_solar_banking_starts_and_restores():
-    memory = SolarMemory()
-    hot = snap(24.0, now=T0.replace(hour=12), outdoor_temp=33.0, solar_export_w=3000)
-    command, block = solar_command(hot, memory)
-    assert command.power is True
-    assert command.mode is HvacMode.COOL
-    assert command.target_temp == 22.0
-    assert block is not None
-    assert block.kind == "solar"
-    cloudy = replace(hot, solar_export_w=200)
-    command, block = solar_command(cloudy, memory)
-    assert command == Command(power=False)
-    assert block is None
 
 
 def test_periods_cover_the_next_day():

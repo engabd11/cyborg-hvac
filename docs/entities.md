@@ -21,7 +21,11 @@ Each unit is a device, and each zone is its own device linked to the unit, so zo
 | Filter | Filter cleaning reminder. Starts disabled until its meaning is confirmed on ducted units. |
 | Advice | How many smart comfort recommendations are open; the top one and the full list are attributes. |
 | Guest mode | Puts guest zones first. |
-| Autopilot: presence zoning, room balancing, weather pre-conditioning, solar shifting, bedtime | Each autopilot behaviour, off until you turn it on. Attributes show manual holds and the last change with its reason. |
+| Climate Butler | Hands the unit to the Butler: mode, setpoint, fan and every damper. Off until you turn it on. Attributes show manual holds and the last change with its reason. (Autopilot: room balancing before 0.7.) |
+| Bedtime | Holds the sleep zones within half a degree of the sleep temperature. |
+| Climate Butler: presence zoning, Climate Butler: weather pre-conditioning | What the Butler takes into account, each off until you turn it on. |
+| Energy | Auto, Eco, Mid or Max: how much comfort is worth right now. Attributes say which mode is in use and why. |
+| Climate Butler activity | What the Butler is doing in one word (heating, cooling, drying, ventilating, idling, watching, resting, away, holding, paused, off), with the headline, reason and watched rooms as attributes. |
 | Sleep temperature | The temperature bedtime holds sleep zones at. |
 
 Switching on a feature the unit would refuse in its current mode is stopped with a clear message instead of failing silently in the cloud.

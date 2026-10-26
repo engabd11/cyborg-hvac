@@ -207,22 +207,41 @@
         "name": "Guest mode"
       },
       "presence_zoning": {
-        "name": "Autopilot: presence zoning"
+        "name": "Climate Butler: presence zoning"
       },
       "room_balancing": {
-        "name": "Autopilot: room balancing"
+        "name": "Climate Butler"
       },
       "weather_precondition": {
-        "name": "Autopilot: weather pre-conditioning"
-      },
-      "solar_shift": {
-        "name": "Autopilot: solar shifting"
+        "name": "Climate Butler: weather pre-conditioning"
       },
       "sleep_mode": {
-        "name": "Autopilot: bedtime"
+        "name": "Bedtime"
       }
     },
     "select": {
+      "energy_mode": {
+        "name": "Energy",
+        "state": {
+          "auto": "Auto",
+          "eco": "Eco",
+          "mid": "Mid",
+          "max": "Max"
+        },
+        "state_attributes": {
+          "active": {
+            "name": "In use",
+            "state": {
+              "eco": "Eco",
+              "mid": "Mid",
+              "max": "Max"
+            }
+          },
+          "reason": {
+            "name": "Why"
+          }
+        }
+      },
       "sleep": {
         "name": "Sleep",
         "state": {
@@ -248,6 +267,22 @@
       },
       "advice": {
         "name": "Advice"
+      },
+      "climate_butler": {
+        "name": "Climate Butler activity",
+        "state": {
+          "heat": "Heating",
+          "cool": "Cooling",
+          "dry": "Drying",
+          "vent": "Ventilating",
+          "idle": "Idling",
+          "watch": "Watching",
+          "rest": "Resting",
+          "away": "Away",
+          "hold": "Holding",
+          "paused": "Paused",
+          "off": "Off"
+        }
       }
     },
     "binary_sensor": {
@@ -311,13 +346,19 @@
       },
       "inputs": {
         "title": "House sensors and weather",
-        "description": "Smart comfort uses these to give advice. Leave out anything you do not have.",
+        "description": "Advice and the Climate Butler use these. Leave out anything you do not have.",
         "data": {
           "outdoor_sensor": "Outdoor temperature sensor",
           "weather_entity": "Weather forecast (for example BOM)",
           "people": "People (home or away)",
           "solar_grid_sensor": "Grid power sensor",
           "solar_export_negative": "Grid power is negative while exporting",
+          "solar_power_sensor": "Solar power sensor",
+          "battery_power_sensor": "Battery power sensor",
+          "battery_charging_negative": "Battery power is negative while charging",
+          "battery_soc_sensor": "Battery charge sensor",
+          "max_solar_kw": "Plenty of solar",
+          "vent_min_battery": "Keep air moving above",
           "scan_interval": "Polling interval",
           "window_delay": "Window delay",
           "door_delay": "Door delay",
@@ -326,6 +367,11 @@
         },
         "data_description": {
           "solar_grid_sensor": "Used to spot spare solar. Most inverters report export as negative grid power.",
+          "solar_power_sensor": "What the panels make right now. With the battery and grid sensors, Energy on Auto picks Eco, Mid or Max.",
+          "battery_power_sensor": "Power into or out of the house battery.",
+          "battery_soc_sensor": "The house battery's charge in percent.",
+          "max_solar_kw": "Solar output that counts as free power (Max), even without exporting.",
+          "vent_min_battery": "While every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. Without a battery sensor it does so only on Max.",
           "people": "Person entities, trackers or presence sensors that are on while someone is home.",
           "window_delay": "How long a window stays open before autopilot closes its zone.",
           "door_delay": "How long a door stays open before autopilot closes its zone. Longer than windows, because doors are walked through.",

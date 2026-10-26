@@ -38,7 +38,7 @@ async def test_room_balancing_moves_dampers_and_respects_manual_changes(
     await hass.services.async_call(
         "switch",
         "turn_on",
-        {"entity_id": "switch.demo_ducted_unit_autopilot_room_balancing"},
+        {"entity_id": "switch.demo_ducted_unit_climate_butler"},
         blocking=True,
     )
     await _tick(hass, comfort)
