@@ -214,6 +214,8 @@ The engine runs every minute and picks the gentlest lever that gets each room wh
 4. **Change mode** only when nothing gentler works.
 5. **Rest**: when every room will stay comfortable for a while, the unit switches off rather than idling, and starts again when a room needs it.
 
+**While the unit rests but its fan runs** (its own reading has sat past its setpoint for 10 minutes, so the compressor is off), the fan's air is just the house's air going round. Rooms well ahead of the rest (too warm while heating, too cool while cooling) get their damper fully open, so that air evens them out for free, while the other rooms keep their opening. The moment a room needs the unit again, those rooms go back to normal (closed if they are well ahead) in the same command. Not during a heatwave's hottest hours.
+
 The dashboard card shows what autopilot is doing and why (for example "Heating HQ (19.5 °C). Letting LIVING (24 °C) cool on its own (8 °C outside).") and each zone's role. The same is in the websocket feed and in diagnostics.
 
 | Role | Meaning |
@@ -221,6 +223,7 @@ The dashboard card shows what autopilot is doing and why (for example "Heating H
 | serve | Behind its aim: more air, up to fully open. |
 | hold | At its aim: its learned holding opening. |
 | shed | Ahead of the house: closed until it is level with the other rooms. |
+| mix | Well ahead (1 degree or more past its aim) while the unit rests with its fan still running: fully open, so air from the rest of the house evens it out for free. Ends the moment the unit works again. |
 | setback | Empty, or second while guests or sleepers come first: closed, or a small trickle (20 to 30%) if it would get too cold or warm. |
 | keeper | Kept open so the fan has enough duct. |
 | shut | A window or door is open. |

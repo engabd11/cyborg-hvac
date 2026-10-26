@@ -175,7 +175,8 @@ def test_heatwave_precools_and_keeps_the_setpoint_sensible():
     peak = 9 * 60  # 15:00
     for zone in (1, 2):
         assert rig.range_of(zone, peak - 60, peak + 60)[1] <= 25.0 + 1.0
-    assert not sim.zones[3].on or sim.zones[3].opening <= 30  # empty room not cooled hard
+    # The empty room gets a trickle, or at most what the airflow floor needs: never full air.
+    assert not sim.zones[3].on or sim.zones[3].opening <= 50
     assert not rig.budget_hit
 
 
@@ -313,3 +314,58 @@ def test_no_outdoor_data_never_switches_modes_on_a_small_excess():
         now = MORNING + timedelta(minutes=minute)
         decision = decide(replace(s, now=now), BALANCING, [], ThermalModel(), memory)
         assert decision.command.mode is None
+
+
+def test_idle_fan_air_goes_to_the_rooms_that_are_too_warm():
+    # The reported house: heating, nothing needs heat, three rooms well ahead, the fan still runs.
+    settings = ComfortSettings(heat_day=20, cool_day=21.5, heat_away=18, cool_away=24)
+    temps = {1: 20.5, 2: 20.9, 3: 22.2, 4: 22.9}
+    state = {n: (True, 50) for n in temps}
+    memory, model = AutopilotMemory(fresh=False, last_mode=HvacMode.HEAT), ThermalModel()
+    now = MORNING.replace(hour=14)
+
+    def step(minutes_later):
+        zones = (
+            z(
+                1,
+                temps[1],
+                on=state[1][0],
+                opening=state[1][1],
+                sleep=True,
+                occupied=True,
+                priority=Priority.BEDROOM,
+            ),
+            z(2, temps[2], on=state[2][0], opening=state[2][1], offset=-1.5, occupied=True),
+            z(3, temps[3], on=state[3][0], opening=state[3][1], occupied=True),
+            z(4, temps[4], on=state[4][0], opening=state[4][1], occupied=True),
+        )
+        at = now + timedelta(minutes=minutes_later)
+        s = snap(zones, target=21.0, current=23.0, now=at, outdoor_temp=14.5, settings=settings)
+        decision = decide(s, BALANCING, [], model, memory)
+        for n, change in decision.command.zones.items():
+            on, opening = state[n]
+            state[n] = (change.on if change.on is not None else on, change.opening or opening)
+        note_sent(memory, decision.command, at, HvacMode.HEAT)
+        return decision
+
+    assert step(0).command.zones == {}  # resting for a moment is not enough
+    idle = step(11)  # resting for ten minutes: its fan's air can be used
+    assert [idle.roles[n] for n in (1, 2, 3, 4)] == [Role.HOLD, Role.MIX, Role.MIX, Role.MIX]
+    assert idle.command.zones == {
+        n: ZoneCommand(on=None, opening=100) for n in (2, 3, 4)
+    }  # one command; the bedroom keeps its opening
+    assert "Sending more air to" in idle.reason
+    temps[1] = 19.9  # the bedroom now needs heat: the warm rooms close in one go
+    heating = step(21)
+    assert heating.roles[1] is Role.SERVE
+    assert all(heating.command.zones[n] == ZoneCommand(on=False) for n in (2, 4))
+    # Without a spill zone the fan needs a second zone: the least ahead stays, trimmed.
+    assert heating.roles[3] is Role.KEEPER
+    assert heating.command.zones[3] == ZoneCommand(on=None, opening=50)
+    temps[1] = 20.2  # still warming: nothing flips at the threshold
+    assert step(31).command.zones == {}
+    temps[1] = 20.6  # back at its aim: the fan's air goes to the warm rooms again
+    again = step(52)  # back at its aim, and ten minutes of rest again
+    assert all(again.roles[n] is Role.MIX for n in (2, 3, 4))
+    assert all(again.command.zones[n].on is True for n in (2, 4))
+    assert again.command.zones[3] == ZoneCommand(on=None, opening=100)

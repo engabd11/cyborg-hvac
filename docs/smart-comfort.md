@@ -41,9 +41,11 @@ With **Room balancing** or **Bedtime** on, one engine runs the unit and every zo
 4. **Change mode** only when nothing gentler works: a room has stayed too warm (or too cold) for 20 minutes, outside will not fix it, the unit has been in its mode for an hour, and in the heating season a room has to be well past its range before cooling is used (and the other way round).
 5. **Power**: when every room will stay comfortable for a while, the unit rests (switches off) rather than idling.
 
+While the unit is in its mode but resting (its reading has sat past its setpoint for 10 minutes, so the compressor is off and only the fan runs), rooms well ahead of the rest get their damper fully open, so the house's own air evens them out for free. They go back to normal the moment a room needs the unit again.
+
 Changes are few and decisive. A damper goes straight to where it should be (100% to 60% in one move, not four) and then stays put for at least 15 minutes; moves under 20% wait. The setpoint moves by a degree or more (half a degree at bedtime), at most every 15 minutes, except to ease off once rooms overshoot. The fan changes at most every half hour. Everything goes out as one command.
 
-The card shows what autopilot is doing and why, for example "Heating MASTER (19.5 °C). Letting LIVING (24 °C) cool on its own (8 °C outside).", and what each zone is doing: **serve** (needs air), **hold** (at its aim), **shed** (ahead, closed until level), **setback** (empty or second), **keeper** (open for the fan), **shut** (window open), **held** (a person's change).
+The card shows what autopilot is doing and why, for example "Heating MASTER (19.5 °C). Letting LIVING (24 °C) cool on its own (8 °C outside).", and what each zone is doing: **serve** (needs air), **hold** (at its aim), **shed** (ahead, closed until level), **mix** (ahead while the unit rests: the fan's air evens it out), **setback** (empty or second), **keeper** (open for the fan), **shut** (window open), **held** (a person's change).
 
 **Fan**: auto normally; low when cooling humid air (it dries better) and at bedtime (quieter); high in a heatwave's hottest hours or when the house is well behind. A fan speed you pick yourself is left alone for 2 hours.
 

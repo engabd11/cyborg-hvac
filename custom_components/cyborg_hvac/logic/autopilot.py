@@ -58,6 +58,15 @@ SHED_ENTER_SLEEP = 0.5  # bedtime holds the bedroom closer
 SHED_EXIT = 0.3  # a closed room rejoins once this close to where the house is
 SHED_CLEAR = 0.4  # ...and always this far inside the point where it would close again
 SECOND_EXIT = 1.0  # a spare room given a trickle keeps it until this far past its aim
+# While no room needs the unit, a room this far past its aim gets the fan's air in full to
+# even it out with the rest, and keeps it until back within MIX_CLEAR of that.
+MIX_AHEAD = 1.0
+MIX_CLEAR = 0.4
+# The unit counts as idle (compressor off, fan still running) once its own reading is this far
+# past its setpoint, and working again once it is back this far on the other side.
+MIX_ENTER = 0.5
+MIX_EXIT = -0.25
+MIX_DELAY = timedelta(minutes=10)  # ...for this long, so a setpoint just written does not count
 REST_MARGIN = 1.0  # every room this far past its aim counts as well ahead...
 IDLE_EXIT = 0.3  # ...and an idling unit picks up again once a room is back this close
 SEASON_GATE = 1.5  # extra degrees before the off-season mode is used
@@ -130,6 +139,7 @@ class Role(StrEnum):
     HOLD = "hold"  # at its aim: the air that keeps it there
     SHED = "shed"  # past its aim: closed until it is back level with the house
     SETBACK = "setback"  # empty, or second while guests or sleepers come first
+    MIX = "mix"  # ahead while no room needs the unit: the fan's air evens it out
     KEEPER = "keeper"  # kept open so the fan has enough duct
     SHUT = "shut"  # a window or door is open
     HELD = "held"  # a person's change is being respected
@@ -180,6 +190,8 @@ class AutopilotMemory:
     balance: BalanceMemory = field(default_factory=BalanceMemory)
     drying: bool = False
     idling: bool = False
+    # True while the unit is satisfied and its fan's air is being sent to rooms that are ahead.
+    mixing: bool = False
     banking: HvacMode | None = None
     health_started: bool = False
     # True until the first decision after a behaviour is switched on: act at once.
@@ -309,14 +321,16 @@ def _conduct(ctx: _Context) -> Decision:
     choice = _choose(ctx, deciding)
     judge = _judge(ctx, choice)
     served_mean = _served_mean(ctx, deciding)
-    roles = _roles(ctx, judge, {z.zone for z in deciding}, served_mean)
+    unit = s.unit
+    roles = _roles(
+        ctx, judge, {z.zone for z in deciding}, served_mean, _fan_only_now(ctx, choice, judge)
+    )
     if choice.mode is HvacMode.DRY:
         for zone in s.sensed_zones:
             if roles[zone.zone] in (Role.HOLD, Role.SHED, Role.SETBACK) and _humid(ctx, zone):
                 roles[zone.zone] = Role.SERVE
-    unit = s.unit
     runs = choice.action in (Action.START, Action.CHANGE) or (
-        choice.action in (Action.KEEP, Action.LEAVE)
+        choice.action in (Action.KEEP, Action.IDLE, Action.LEAVE)
         and unit.power
         and unit.mode in (HvacMode.HEAT, HvacMode.COOL, HvacMode.DRY)
     )
@@ -325,6 +339,10 @@ def _conduct(ctx: _Context) -> Decision:
     zones = _zone_changes(ctx, roles, targets, ideal, kept) if runs else {}
     command = _unit_command(ctx, choice, roles, deciding, targets, zones)
     shown = {n: Role.KEEPER if n in kept else role for n, role in roles.items()}
+    reason = choice.reason
+    mixing = [z for z in s.zones if roles[z.zone] is Role.MIX]
+    if mixing:
+        reason += f" Sending more air to {_rooms(mixing)} to even them out with the rest."
     if choice.action is Action.REST:
         doing = None
     elif choice.action in (Action.WAIT, Action.LEAVE):
@@ -343,12 +361,45 @@ def _conduct(ctx: _Context) -> Decision:
     return Decision(
         command=command,
         mode=doing,
-        reason=choice.reason,
+        reason=reason,
         roles=shown,
         outlook=ctx.view,
         health=ctx.health,
         solar_block=block,
     )
+
+
+def _fan_only_now(ctx: _Context, choice: _Choice, judge: HvacMode) -> bool:
+    """Return True while the unit is satisfied but its fan still moves air.
+
+    The unit's own thermostat decides when its compressor runs: once its reading
+    is past its setpoint it rests and the fan keeps circulating the house's air.
+    Only then can that air even the rooms out without carrying heat (or cooling)
+    into rooms that are already ahead.
+    """
+    unit, memory = ctx.s.unit, ctx.memory
+    running = (
+        unit.power
+        and unit.mode is judge
+        and choice.mode is judge
+        and choice.action in (Action.KEEP, Action.IDLE)
+        # In a heatwave's hottest hours every bit of cooling goes where it is needed.
+        and not ctx.view.peak
+    )
+    if not running or unit.current_temp is None or unit.target_temp is None:
+        memory.mixing = False
+        memory.timers.pop("mix", None)
+        return False
+    past = unit.current_temp - unit.target_temp
+    if judge is HvacMode.COOL:
+        past = -past
+    if choice.action is Action.IDLE:
+        past = max(past, MIX_ENTER)  # set to idle on purpose
+    if memory.mixing:
+        memory.mixing = past >= MIX_EXIT
+    else:
+        memory.mixing = _sustained(memory, "mix", past >= MIX_ENTER, ctx.s.now, MIX_DELAY)
+    return memory.mixing
 
 
 def _active_block(blocks: Iterable[PlanBlock], now: datetime) -> PlanBlock | None:
@@ -414,6 +465,12 @@ def _aim(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
     elif ctx.view.peak and not heat:
         value = min(band.high, value + PEAK_RELAX)
     return value
+
+
+def _wants(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> bool:
+    """Return True while a room needs ``mode``: once short enough, until it reaches its aim."""
+    need = _need(ctx, zone, mode)
+    return need >= SERVE_NEED or (ctx.memory.zone(zone.zone).role is Role.SERVE and need > 0)
 
 
 def _need(ctx: _Context, zone: ZoneInputs, mode: HvacMode) -> float:
@@ -582,7 +639,7 @@ def _choose(ctx: _Context, deciding: list[ZoneInputs]) -> _Choice:
 def _while_running(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> _Choice:
     s, memory = ctx.s, ctx.memory
     other = _opposite(mode)
-    want = [z for z in zones if _need(ctx, z, mode) >= SERVE_NEED]
+    want = [z for z in zones if _wants(ctx, z, mode)]
     wrong = [z for z in zones if _need(ctx, z, other) >= NEED_START]
     _forget_coasts(ctx, wrong)
     stuck = [z for z in wrong if not _coastable(ctx, z, other)]
@@ -723,12 +780,15 @@ def _served_mean(ctx: _Context, deciding: list[ZoneInputs]) -> float | None:
 
 
 def _roles(
-    ctx: _Context, judge: HvacMode, deciding: set[int], served_mean: float | None
+    ctx: _Context,
+    judge: HvacMode,
+    deciding: set[int],
+    served_mean: float | None,
+    idling: bool = False,
 ) -> dict[int, Role]:
     s, memory = ctx.s, ctx.memory
-    needing = {
-        z.zone for z in s.sensed_zones if z.zone in deciding and _need(ctx, z, judge) >= SERVE_NEED
-    }
+    needing = {z.zone for z in s.sensed_zones if z.zone in deciding and _wants(ctx, z, judge)}
+    mixing = idling and not needing
     primary = [z for z in s.sensed_zones if z.zone in deciding and not _second(ctx, z, True)]
     mean_need = (
         sum(_need(ctx, z, judge) for z in primary) / len(primary) if len(primary) > 1 else None
@@ -744,7 +804,9 @@ def _roles(
             role = _unsensed_role(ctx, zone)
         else:
             others = bool(needing - {zone.zone})
-            role = _sensed_role(ctx, zone, judge, zm, zone.zone in deciding, served_mean, others)
+            role = _sensed_role(
+                ctx, zone, judge, zm, zone.zone in deciding, served_mean, others, mixing
+            )
             _learn_hold(ctx, zone, zm, role, judge, mean_need)
         if role is not zm.role:
             zm.role, zm.since = role, s.now
@@ -785,11 +847,14 @@ def _sensed_role(
     deciding: bool,
     served_mean: float | None,
     others: bool,
+    mixing: bool = False,
 ) -> Role:
     """Return a room's role. ``others`` is True while other rooms still need the unit.
 
     A room is closed for being ahead only while others need what the unit is
-    doing: when it is the only one, the setpoint is the gentler lever.
+    doing: when it is the only one, the setpoint is the gentler lever. While no
+    room needs the unit (``mixing``), a room well ahead gets the fan's air in
+    full instead: air from the rest of the house evens it out for free.
     """
     s = ctx.s
     need = _need(ctx, zone, judge)
@@ -797,6 +862,8 @@ def _sensed_role(
         if zm.role in (Role.SERVE, Role.HOLD):
             return Role.SERVE if need > -SECOND_EXIT else Role.SETBACK
         return Role.SERVE if need >= SERVE_NEED else Role.SETBACK
+    if mixing and (need <= -MIX_AHEAD or (zm.role is Role.MIX and need <= -MIX_AHEAD + MIX_CLEAR)):
+        return Role.MIX
     enter = SHED_ENTER_SLEEP if s.sleep_mode and zone.sleep else SHED_ENTER
     if zm.role is Role.SHED:
         if not _back_with_house(ctx, zone, judge, deciding, served_mean, enter):
@@ -929,6 +996,9 @@ def _targets(
     s = ctx.s
     deciding_ids = {z.zone for z in deciding}
     served = _primary_served(ctx, roles, deciding)
+    # The only room being conditioned opens fully, unless others are being mixed: then it keeps
+    # its holding opening so the fan's air goes mostly to them.
+    sole = not any(role is Role.MIX for role in roles.values())
     targets: dict[int, tuple[bool, int]] = {}
     ideal: dict[int, float] = {}
     for zone in s.zones:
@@ -940,11 +1010,13 @@ def _targets(
             targets[zone.zone] = (False, zone.opening)
         elif role in (Role.SHED, Role.SETBACK):
             targets[zone.zone] = _closed(ctx, zone)
+        elif role is Role.MIX:
+            targets[zone.zone] = (True, _level(ctx, zone, high))
         elif not zone.has_sensor:
             reopen = not s.sleep_mode and zone.opening > 0
             targets[zone.zone] = (True, zone.opening if reopen else high)
         else:
-            hold = _hold(ctx, zone, judge, served == [zone.zone])
+            hold = _hold(ctx, zone, judge, sole and served == [zone.zone])
             value: float = hold
             need = max(0.0, _need(ctx, zone, judge))
             if role is Role.SERVE and _second(ctx, zone, zone.zone in deciding_ids):
@@ -1045,8 +1117,16 @@ _CLOSED_ROLES = (Role.SHED, Role.SETBACK, Role.SHUT)
 
 
 def _flipped(before: Role | None, after: Role | None) -> bool:
-    """Return True when a role change opens a closed zone or closes an open one."""
-    return before is None or (before in _CLOSED_ROLES) != (after in _CLOSED_ROLES)
+    """Return True when a role change opens or closes a zone, or starts or ends mixing.
+
+    Mixing ends the moment the unit works again, so those rooms must not wait out
+    the dwell with the fan's air (now warm or cool) still going to them.
+    """
+    return (
+        before is None
+        or (before in _CLOSED_ROLES) != (after in _CLOSED_ROLES)
+        or (before is Role.MIX) != (after is Role.MIX)
+    )
 
 
 def _matches(zone: ZoneInputs, on: bool, opening: int) -> bool:
