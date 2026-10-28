@@ -130,7 +130,7 @@ Integration page → **Configure** → **House sensors and weather**.
 | Battery power is negative while charging | on | Turn off if your battery reports charging as positive. |
 | Battery charge sensor | none | The house battery's charge in percent. Decides [ventilation](#ventilation). |
 | Plenty of solar | 6 kW (0.5 to 50) | Solar output that counts as free power (Max), even without exporting. |
-| Keep air moving above | 30% (0 to 100) | While every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. |
+| Keep air moving above | 30% (0 to 100) | In mild weather, while every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. See [Ventilation](#ventilation). |
 | Window delay | 2 min (0 to 30) | How long a window stays open before its zone counts as open to outside. |
 | Door delay | 5 min (0 to 60) | The same for doors; longer, because doors are walked through. |
 | Fewest open zones | 2 (1 to 4) | While the unit runs, autopilot never goes below this many open zones. Only lower it if your installer says one zone is safe. |
@@ -224,7 +224,7 @@ The engine runs every minute and picks the gentlest lever that gets each room wh
 2. **Move a damper** when rooms differ from each other. A room behind the others gets more air, a room holding its aim gets its learned holding opening, and a room well ahead is closed until it is level with the rest of the house, then rejoins.
 3. **Move the setpoint** when the house as a whole is off. The unit regulates on return air, so the setpoint is corrected for how far that reads from the rooms, with a gentle push while a room is short and a slow correction that learns any steady error. Its limits move with that correction too: cooling one warm bedroom while the rest of the house is cold, the unit reads cold return air and is set lower than the bedroom's aim, or it would never cool it.
 4. **Change mode** only when nothing gentler works.
-5. **Keep air moving or rest**: when every room will stay comfortable for a while, the fan keeps air moving through the house if there is power to spare (see [Ventilation](#ventilation)); otherwise the unit switches off rather than idling. It starts again the moment a room needs it.
+5. **Hold, keep air moving, or rest**: when every room will stay comfortable for a while, what happens depends on the weather (see [Ventilation](#ventilation)). In mild weather the fan alone keeps air moving through the house if there is power to spare. In cold or hot weather the unit stays in heating or cooling, from half a battery up or on Max: at its setpoint it rests its compressor, its fan keeps going, and it picks up again by itself as soon as the rooms dip. Otherwise the unit switches off, and starts again the moment a room needs it.
 
 **While the unit rests but its fan runs** (its own reading has sat past its setpoint for 10 minutes, so the compressor is off), the fan's air is just the house's air going round. Rooms well ahead of the rest (too warm while heating, too cool while cooling) get their damper fully open, so that air evens them out for free, while the other rooms keep their opening. The moment a room needs the unit again, those rooms go back to normal (closed if they are well ahead) in the same command. Not during a heatwave's hottest hours.
 
@@ -306,6 +306,8 @@ A new mode must last 10 minutes before Auto uses it, so a passing cloud changes 
 When every room is comfortable and nothing needs heating or cooling for a while, the Butler runs the fan only rather than switching off, so air keeps moving through the house: rooms stay fresh, and warm or cool spots even out with the rest of the house for the price of the fan. It does this while the house battery is above **Keep air moving above** (30%), starting again only once it is 3 points above that; without a battery charge sensor, only on Max. Not while drying, and not while everyone is out (except on Max).
 
 Every zone opens fully, except a room the house's mixed air would push out of its range (one within 0.3 degrees of the edge on that side), which closes until it is 0.6 inside again. The fan runs low (medium on Max, low at bedtime). The moment a room needs heating or cooling, the unit switches straight back.
+
+**Only in mild weather.** Fan-only just sends the house's own air round the ducts with nothing behind it, so on a cold day the house cools faster than it would at rest (and on a hot day it warms). The fan runs alone only while outside stays within 2 degrees of your comfort range for the next hour. In colder or hotter weather a comfortable house instead stays in heating or cooling, as long as the battery is at least half full (or on Max): at its setpoint the unit rests its compressor, keeps its fan going, and heats or cools again by itself as soon as the rooms dip. Below half a battery the unit switches off. If the fan is already running when the weather turns, heating or cooling takes over, or the unit switches off. Without any outdoor reading or forecast, ventilation works as above.
 
 ### Health
 

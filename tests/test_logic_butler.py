@@ -207,6 +207,93 @@ def test_ventilation_evens_out_a_warm_bedroom_with_the_house_air():
     assert rig.temps[-1][1] < 22.6  # mixed down towards the rest of the house
 
 
+def chilly(**kw):
+    """The comfortable rooms of ``comfy`` on a 10 °C day."""
+    return replace(comfy(**kw), outdoor_temp=10.0, forecast=flat(MORNING, 10))
+
+
+def test_a_cold_or_hot_day_never_runs_the_fan_alone():
+    # The reported case: heating has the rooms past their aim and the battery has charge.
+    # Fan-only would push the house's air through cold ducts with nothing behind it.
+    resting = decide(chilly(battery_soc=80.0), BUTLER, [], ThermalModel(), AutopilotMemory())
+    assert resting.command.is_empty  # a unit at rest stays at rest
+    assert resting.activity is Activity.REST
+
+    def heating(soc):
+        s = chilly(battery_soc=soc)
+        s = replace(s, unit=replace(s.unit, power=True, target_temp=21.0, current_temp=22.0))
+        memory = AutopilotMemory(fresh=False, last_mode=HvacMode.HEAT)
+        return decide(s, BUTLER, [], ThermalModel(), memory)
+
+    # Half a battery or more: heating rests at its setpoint, its own fan keeps going.
+    held = heating(80.0)
+    assert held.command.mode is None
+    assert held.command.power is None
+    assert held.activity is Activity.IDLE
+    assert heating(40.0).command == Command(power=False)
+
+    # Fan-only already running when it turns cold: heating takes over, or the unit stops.
+    def fanning(soc, switches=BUTLER):
+        s = replace(chilly(battery_soc=soc), unit=UnitState(power=True, mode=HvacMode.FAN_ONLY))
+        return decide(s, switches, [], ThermalModel(), AutopilotMemory())
+
+    taken = fanning(80.0)
+    assert taken.command.mode is HvacMode.HEAT
+    assert taken.headline == "Heating instead of the fan"
+    assert fanning(40.0).command == Command(power=False)
+    free = Switches(balancing=True, energy=EnergyMode.MAX)
+    assert fanning(None, free).command.mode is HvacMode.HEAT  # free power: comfort first
+
+    # Mild now, 12 °C within the hour: no fan.
+    turning = replace(
+        comfy(battery_soc=80.0),
+        forecast=(ForecastPoint(MORNING, 19.0), ForecastPoint(MORNING + timedelta(hours=1), 12.0)),
+    )
+    assert decide(turning, BUTLER, [], ThermalModel(), AutopilotMemory()).command.is_empty
+
+    # A hot day the same way round: cooling rests at its setpoint.
+    hot = snap(
+        (z(1, 22.0), z(2, 22.2), z(3, 21.9)),
+        mode=HvacMode.COOL,
+        target=23.0,
+        current=22.0,
+        now=SUMMER,
+        outdoor_temp=33.0,
+        forecast=flat(SUMMER, 33),
+        battery_soc=80.0,
+    )
+    memory = AutopilotMemory(fresh=False, last_mode=HvacMode.COOL)
+    cooled = decide(hot, BUTLER, [], ThermalModel(), memory)
+    assert cooled.command.mode is None
+    assert cooled.command.power is None
+    assert cooled.activity is Activity.IDLE
+
+
+def test_a_cold_day_holds_heating_instead_of_fanning_the_house():
+    # Heating from cold on an 8 °C day, in a house the model believes keeps its heat better
+    # than it does, so it expects the rooms to stay comfortable for hours once warm.
+    def run(soc):
+        sim = realistic(SimSystem.create(4, start=19.0, outdoor=8.0), loss=0.001)
+        sim.power, sim.mode, sim.target = True, HvacMode.HEAT, 21.0
+        rig = Rig(sim, BUTLER, MORNING, outdoor=lambda minute: 8.0, snap_kw={"battery_soc": soc})
+        for n in sim.zones:
+            rig.model.zone(n).loss = 0.0006
+        return rig.run(6 * 60)
+
+    held = run(80.0)
+    assert HvacMode.FAN_ONLY not in held.modes
+    assert None not in held.modes  # never off: heating rests at its setpoint between bursts
+    for zone in range(1, 5):
+        low, _ = held.range_of(zone, 90)
+        assert low >= 20.0, (zone, low)  # aim 20.5; a room needs the unit at 20.0
+    assert held.writes() <= 15
+    assert not held.budget_hit
+    rested = run(40.0)
+    assert HvacMode.FAN_ONLY not in rested.modes
+    assert None in rested.modes  # under half a battery it switches off between heats
+    assert not rested.budget_hit
+
+
 # Energy modes -------------------------------------------------------------------------------
 
 

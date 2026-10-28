@@ -96,6 +96,8 @@ def test_auto_mode_suggests_fixed_mode():
 
 def test_uneven_rooms_suggest_fan():
     assert "mode_fan_mix" in ids(snap((zone(1, 20.2), zone(2, 23.0))))
+    # Not on a cold day: the fan alone would push the house's air through cold ducts.
+    assert "mode_fan_mix" not in ids(snap((zone(1, 20.2), zone(2, 23.0)), outdoor_temp=8.0))
 
 
 def test_humid_rooms_suggest_dry():
