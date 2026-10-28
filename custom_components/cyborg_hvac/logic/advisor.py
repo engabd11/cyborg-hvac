@@ -332,6 +332,8 @@ def rule_mode(s: HouseSnapshot, model: ThermalModel | None = None) -> Iterable[R
         and not (humid and max(humid) > s.settings.humidity_max)
         and max(temps) - min(temps) > SPREAD_DEGREES
         and comfortable
+        # In cold or hot weather the fan's air goes through ducts that lose or gain heat.
+        and outdoor_mild
         and mode is not HvacMode.FAN_ONLY
         and _supports(s, HvacMode.FAN_ONLY)
         and (not running or mode is None)

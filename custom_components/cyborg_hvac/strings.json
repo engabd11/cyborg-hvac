@@ -371,7 +371,7 @@
           "battery_power_sensor": "Power into or out of the house battery.",
           "battery_soc_sensor": "The house battery's charge in percent.",
           "max_solar_kw": "Solar output that counts as free power (Max), even without exporting.",
-          "vent_min_battery": "While every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. Without a battery sensor it does so only on Max.",
+          "vent_min_battery": "In mild weather, while every room is comfortable, the fan keeps air moving through the house as long as the battery is above this. Without a battery sensor it does so only on Max. In cold or hot weather the unit stays in heating or cooling instead (from half a battery up, or on Max) and its own fan keeps the air moving.",
           "people": "Person entities, trackers or presence sensors that are on while someone is home.",
           "window_delay": "How long a window stays open before autopilot closes its zone.",
           "door_delay": "How long a door stays open before autopilot closes its zone. Longer than windows, because doors are walked through.",

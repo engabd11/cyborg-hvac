@@ -11,8 +11,12 @@ lever that gets there, and watches that it works:
 - rooms that differ from each other get different damper openings;
 - the whole house off its aim moves the setpoint;
 - mode and power change only when nothing gentler works;
-- while every room is comfortable and power allows, the fan keeps air moving
-  through the house instead of the unit switching off.
+- once every room is comfortable, the unit's own thermostat does the holding:
+  in heating or cooling it rests its compressor at the setpoint, keeps its fan
+  going and picks up again by itself. Fan-only only recirculates the house's
+  air through the ducts with nothing behind it, so it is used in mild weather
+  alone; in cold or hot weather a comfortable house stays in its mode while
+  power allows, and the unit switches off otherwise.
 
 Changes are few and decisive: a damper jumps straight to where it should be
 and stays there for a while, and small corrections are ignored. Everything
@@ -98,6 +102,13 @@ VENT_EDGE = 0.3  # a room this close to its range's edge, where mixed air pushes
 VENT_REOPEN = 0.6  # ...until it is this far inside again
 VENT_RESUME = 3.0  # battery % above the floor before ventilation starts again
 VENT_SETTLE = timedelta(minutes=10)  # the least time after a mode change before fan-only
+# Fan-only only while outside stays within this of the house's range for the next hour: past
+# it the ducts lose (or gain) heat and nothing is behind the air.
+VENT_OUTSIDE = 2.0
+VENT_AHEAD = 60
+# In cold or hot weather a comfortable house stays in its mode while the battery is at least
+# this full (always on Max), and the unit switches off otherwise.
+HOLD_MIN_BATTERY = 50.0
 
 # Pacing: few, decisive changes.
 START_DELAY = timedelta(minutes=5)
@@ -903,10 +914,17 @@ def _while_running(ctx: _Context, zones: list[ZoneInputs], mode: HvacMode) -> _C
     deep = all(_need(ctx, z, mode) <= -margin for z in zones)
     memory.idling = deep
     if coast is not None and (coast >= LONG_COAST or (deep and coast >= OFF_AFTER)):
-        if not _vent_ok(ctx):
-            return _Choice(None, Action.REST, f"Resting: {_stay_reason(coast)}{note}", "Resting")
-        if _dwelt(memory, s.now, VENT_SETTLE):
-            return _vent(f"{_stay_reason(coast).capitalize()}{note}")
+        weather = _weather_mode(ctx)
+        rest = _Choice(None, Action.REST, f"Resting: {_stay_reason(coast)}{note}", "Resting")
+        if weather is None:
+            if not _vent_ok(ctx):
+                return rest
+            if _dwelt(memory, s.now, VENT_SETTLE):
+                return _vent(f"{_stay_reason(coast).capitalize()}{note}")
+        elif weather is not mode or not _hold_ok(ctx):
+            return rest
+        # Otherwise it stays in its mode: at its setpoint the unit rests its compressor, keeps
+        # its fan going and picks up again by itself.
     if deep:
         return _Choice(
             mode, Action.IDLE, f"Rooms are past their aim: idling.{note}", "Idling: rooms are ahead"
@@ -938,8 +956,19 @@ def _from_rest(ctx: _Context, zones: list[ZoneInputs], running: HvacMode | None)
         note = "".join(_coast_note(ctx, [z], mode) for z, mode in coasting)
         dry = running is HvacMode.DRY and memory.last_mode is HvacMode.DRY
         reason = ("Dry enough." if dry else "Rooms are comfortable.") + note
-        if _vent_ok(ctx):
-            return _vent(reason)
+        weather = _weather_mode(ctx)
+        if weather is None:
+            if _vent_ok(ctx):
+                return _vent(reason)
+        elif running is not None and weather in s.caps.hvac_modes and _hold_ok(ctx):
+            word = "cold" if weather is HvacMode.HEAT else "warm"
+            return _Choice(
+                weather,
+                Action.CHANGE,
+                f"{reason} Too {word} outside for the fan alone: "
+                f"{_word(weather)} holds the rooms instead.",
+                f"{_verb(weather)} instead of the fan",
+            )
         return _Choice(None, Action.REST, reason, "Resting")
     if len(options) == 2:
         preferred = _season_mode(ctx, zones)
@@ -1004,6 +1033,34 @@ def _vent_ok(ctx: _Context) -> bool:
         floor = s.settings.vent_min_battery
         memory.vent_ok = soc > (floor if memory.vent_ok else floor + VENT_RESUME)
     return memory.vent_ok
+
+
+def _weather_mode(ctx: _Context) -> HvacMode | None:
+    """Return the mode outside pushes the house towards over the next hour, None while mild.
+
+    None as well without any outdoor reading or forecast: nothing to go by.
+    """
+    band = _house_band(ctx)
+    ahead = [t for t in (ctx.s.outdoor_temp, *ctx.outdoors[:VENT_AHEAD]) if t is not None]
+    if any(t < band.low - VENT_OUTSIDE for t in ahead):
+        return HvacMode.HEAT
+    if any(t > band.high + VENT_OUTSIDE for t in ahead):
+        return HvacMode.COOL
+    return None
+
+
+def _hold_ok(ctx: _Context) -> bool:
+    """Return True while a comfortable house in cold or hot weather stays in its mode.
+
+    Always on Max; otherwise while the house battery is at least half full, and
+    never while everyone is out.
+    """
+    s = ctx.s
+    if ctx.away_off or (s.anyone_home is False and not ctx.energy.everywhere):
+        return False
+    if ctx.energy.everywhere:
+        return True
+    return s.battery_soc is not None and s.battery_soc >= HOLD_MIN_BATTERY
 
 
 def _drying(ctx: _Context, zones: list[ZoneInputs], running: HvacMode | None) -> _Choice | None:
